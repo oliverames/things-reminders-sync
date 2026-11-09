@@ -30,6 +30,10 @@ public struct SyncReport: Sendable {
     public var log: [SyncLogEntry] = []
     public var snapshot = ThingsSnapshot()
     public var reminderLists: [ReminderList] = []
+    /// Reminders read at the start of the pass (for previews; sections only for lists that mirror them).
+    public var reminders: [ReminderItem] = []
+    /// App-created containers and sections removed this pass (retargeted old targets, emptied headings and sections).
+    public var removedContainers = 0
 
     public var changeCount: Int {
         createdInThings + createdInReminders + updatedInThings + updatedInReminders
@@ -51,8 +55,11 @@ public struct SyncEngine: Sendable {
     }
 
     /// Runs one pass. `forceDeletions` lifts the deletion safety limit (the user acknowledged it with Sync Now).
-    public func sync(config: SyncConfig, links: LinkStore, scope: SyncScope, forceDeletions: Bool = false) async throws -> SyncReport {
-        let pass = SyncPass(engine: self, config: config, store: links, scope: scope, force: forceDeletions)
+    /// `backfillLog` (newest first) lets a full pass infer the ownership ledger for data created before it existed
+    /// (see `LedgerBackfill`); the coordinator passes it only until the one-time backfill has run.
+    public func sync(config: SyncConfig, links: LinkStore, scope: SyncScope, forceDeletions: Bool = false,
+                     backfillLog: [SyncLogEntry]? = nil) async throws -> SyncReport {
+        let pass = SyncPass(engine: self, config: config, store: links, scope: scope, force: forceDeletions, backfillLog: backfillLog)
         return try await pass.run()
     }
 }
@@ -90,6 +97,7 @@ private final class SyncPass {
     var store: LinkStore
     let scope: SyncScope
     let force: Bool
+    let backfillLog: [SyncLogEntry]?
     var report: SyncReport
 
     var snapshot = ThingsSnapshot()
@@ -103,9 +111,9 @@ private final class SyncPass {
     var failedMappings: Set<String> = []
     var groceryLists: Set<String> = []
 
-    init(engine: SyncEngine, config: SyncConfig, store: LinkStore, scope: SyncScope, force: Bool) {
+    init(engine: SyncEngine, config: SyncConfig, store: LinkStore, scope: SyncScope, force: Bool, backfillLog: [SyncLogEntry]?) {
         things = engine.things; reminders = engine.reminders; days = DayFormatter(timeZone: engine.timeZone)
-        self.config = config; self.store = store; self.scope = scope; self.force = force
+        self.config = config; self.store = store; self.scope = scope; self.force = force; self.backfillLog = backfillLog
         report = SyncReport(config: config, links: store)
     }
 
@@ -136,6 +144,11 @@ private final class SyncPass {
             if let e = r.externalId { remindersByExternal[e] = r }
         }
         groceryLists = Set(lists.filter(\.isGroceries).map(\.id))
+        if isFull, !store.ledgerBackfilled, let backfillLog {
+            let result = LedgerBackfill.infer(log: backfillLog, store: store, config: config, snapshot: snapshot, reminders: items)
+            store = result.store
+            if result.hasChanges { log(.info, "Worked out which items this app created: \(result.summary)") }
+        }
         buildActiveMappings(lists: lists)
         await migrateRetargetedMappings()
         buildThingsScope()
@@ -149,7 +162,11 @@ private final class SyncPass {
         await runDeletions(linksAtStart: linksAtStart)
 
         store.links.removeAll { removedLinks.contains($0.id) }
+        await recordCreatedSections()
         if isFull {
+            if backfillLog != nil { store.ledgerBackfilled = true }
+            await cleanUpEmptyHeadingsAndSections(lists: lists)
+
             store.detachedThingsIds = store.detachedThingsIds.filter { snapshot.tasks[$0].map { !$0.trashed } ?? false }
             store.detachedReminderIds = store.detachedReminderIds.filter { remindersById[$0] != nil }
         }
@@ -157,6 +174,7 @@ private final class SyncPass {
         report.config = config
         report.snapshot = snapshot
         report.reminderLists = lists
+        report.reminders = items
         return report
     }
 
@@ -179,6 +197,7 @@ private final class SyncPass {
                     id = try await things.createHeading(title: m.targetTitle, projectId: project)
                 }
                 config.mappings[i].targetId = id
+                store.ownedThings.append(OwnedThingsContainer(id: id, kind: .init(m.mode), mappingId: m.id, title: m.targetTitle))
                 log(.change, "Created Things \(m.mode.rawValue) \"\(m.targetTitle)\" for list \"\(m.listTitle)\"")
             } catch {
                 fail("Could not create Things \(m.mode.rawValue) \"\(m.targetTitle)\": \(error.localizedDescription)")
@@ -256,7 +275,7 @@ private final class SyncPass {
                     case .project:
                         // Keep the to-do under a same-named heading when both projects mirror sections.
                         if sectionsActive(m), let group = thingsGroup(task, oldMapping) {
-                            newHeading = try await heading(titled: group, in: target)
+                            newHeading = try await heading(titled: group, in: target, mappingId: m.id)
                             patch.placement = .heading(newHeading!)
                         } else {
                             patch.placement = .project(target)
@@ -284,7 +303,11 @@ private final class SyncPass {
                 }
             }
             if moved > 0 {
-                log(.change, "Moved \(moved) linked to-do\(moved == 1 ? "" : "s") for \"\(m.listTitle)\" from Things \(oldMode.rawValue) \"\(targetName(oldMode, oldMapping.targetId))\" to \(m.mode.rawValue) \"\(targetName(m.mode, target))\"; the old \(oldMode.rawValue) was left in place")
+                log(.change, "Moved \(moved) linked to-do\(moved == 1 ? "" : "s") for \"\(m.listTitle)\" from Things \(oldMode.rawValue) \"\(targetName(oldMode, oldMapping.targetId))\" to \(m.mode.rawValue) \"\(targetName(m.mode, target))\"; the old \(oldMode.rawValue) was kept unless this app created it and it is now empty")
+            }
+            if !failed, let oldId = oldMapping.targetId {
+                await removeOwnedIfEmpty(.init(oldMode), id: oldId,
+                                         why: "list \"\(m.listTitle)\" moved to \(m.mode.rawValue) \"\(targetName(m.mode, target))\"")
             }
             if failed {
                 // Leave the old signature so the next pass retries; skip the mapping now so links whose
@@ -308,21 +331,7 @@ private final class SyncPass {
         }
     }
 
-    func matches(_ task: ThingsTask, _ m: ListMapping) -> Bool {
-        guard let target = m.targetId else { return false }
-        switch m.mode {
-        case .project:
-            if task.projectId == target { return true }
-            if let h = task.headingId, let heading = snapshot.tasks[h], heading.projectId == target { return true }
-            return false
-        case .area:
-            return task.areaId == target && task.projectId == nil && task.headingId == nil
-        case .tag:
-            return task.tagIds.contains(target)
-        case .heading:
-            return task.headingId == target
-        }
-    }
+    func matches(_ task: ThingsTask, _ m: ListMapping) -> Bool { taskMatches(task, m, in: snapshot) }
 
     // MARK: Groups (Reminders sections <-> Things headings)
 
@@ -338,7 +347,7 @@ private final class SyncPass {
 
     /// The existing heading titled `title` in the project (case-insensitive, oldest first when duplicated), or a new one.
     /// A heading created here joins the snapshot, so later items in the pass reuse it.
-    func heading(titled title: String, in project: String) async throws -> String {
+    func heading(titled title: String, in project: String, mappingId: String) async throws -> String {
         guard let clean = Fingerprint.cleanGroup(title) else { throw ThingsCloudError.invalidChange(["empty heading title"]) }
         let key = clean.lowercased()
         let hits = snapshot.tasks.values
@@ -347,6 +356,7 @@ private final class SyncPass {
         if let existing = hits.first { return existing.id }
         let id = try await things.createHeading(title: clean, projectId: project)
         snapshot.tasks[id] = ThingsTask(id: id, kind: .heading, title: clean, projectId: project)
+        store.ownedThings.append(OwnedThingsContainer(id: id, kind: .heading, mappingId: mappingId, title: clean))
         log(.change, "Created Things heading \"\(clean)\" in \"\(snapshot.tasks[project]?.title ?? "project")\"")
         return id
     }
@@ -354,7 +364,7 @@ private final class SyncPass {
     func placement(forGroup group: String?, in m: ListMapping) async throws -> ThingsPlacement {
         guard let target = m.targetId else { throw ThingsCloudError.notFound("target of \(m.listTitle)") }
         guard let group else { return .project(target) }
-        return .heading(try await heading(titled: group, in: target))
+        return .heading(try await heading(titled: group, in: target, mappingId: m.id))
     }
 
     /// After a reminder write that asked for `wanted` (nil: no section), checks what RemCTL reports.
@@ -563,8 +573,6 @@ private final class SyncPass {
 
     // MARK: Merge
 
-    enum Side { case reminders, things }
-
     func laterSide(_ r: Date?, _ t: Date?) -> Side {
         if let r, let t { return r > t ? .reminders : .things }
         if r != nil { return .reminders }
@@ -768,7 +776,8 @@ private final class SyncPass {
                                         completionDate: r.completionDate, placement: placement, tagIds: tags)
             let id = try await things.createTodo(draft)
             store.links.append(LinkRecord(reminderId: r.id, reminderExternalId: r.externalId, thingsId: id, mappingId: m.id,
-                                          fingerprint: Fingerprint(reminder: r, days: days, group: group)))
+                                          fingerprint: Fingerprint(reminder: r, days: days, group: group),
+                                          copySide: .things, copiedCompleted: r.completed))
             report.createdInThings += 1
             log(.change, "Created Things to-do \"\(r.title)\" from list \"\(m.listTitle)\"")
         } catch {
@@ -795,11 +804,81 @@ private final class SyncPass {
                 }
             }
             store.links.append(LinkRecord(reminderId: r.id, reminderExternalId: r.externalId, thingsId: t.id, mappingId: m.id,
-                                          fingerprint: fingerprint))
+                                          fingerprint: fingerprint, copySide: .reminders, copiedCompleted: done))
             report.createdInReminders += 1
             log(.change, "Created reminder \"\(t.title)\" in \"\(m.listTitle)\"")
         } catch {
             fail("Could not create reminder \"\(t.title)\": \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: Ownership ledger cleanup
+
+    /// Removes a container this app created once nothing is left in it: projects and headings go to the Trash,
+    /// areas and tags are deleted. Containers the user made (not in the ledger) and containers a mapping still
+    /// targets are never touched.
+    @discardableResult
+    func removeOwnedIfEmpty(_ kind: OwnedThingsContainer.Kind, id: String, why: String) async -> Bool {
+        guard let entry = store.ownedThings.first(where: { $0.id == id && $0.kind == kind }) else { return false }
+        guard snapshot.exists(kind, id: id) else {
+            store.ownedThings.removeAll { $0.id == id }   // already gone: nothing left to track
+            return false
+        }
+        guard !config.targetIds().contains(id), snapshot.isEmpty(kind, id: id) else { return false }
+        let name = snapshot.displayTitle(kind, id: id) ?? entry.title
+        do {
+            try await things.removeContainer(entry)
+            snapshot.markRemoved(kind, id: id)
+            store.ownedThings.removeAll { $0.id == id }
+            report.removedContainers += 1
+            log(.change, "Removed empty Things \(kind.rawValue) \"\(name)\" (created by this app; \(why))")
+            return true
+        } catch {
+            log(.warning, "Could not remove empty Things \(kind.rawValue) \"\(name)\": \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    func recordCreatedSections() async {
+        for c in await reminders.takeCreatedSections()
+        where !store.ownedSections.contains(where: { $0.matches(listId: c.listId, name: c.name) }) {
+            store.ownedSections.append(OwnedReminderSection(listId: c.listId, name: c.name))
+        }
+    }
+
+    /// End of a full pass: trash app-created headings that hold no to-dos and delete app-created Reminders
+    /// sections that hold no reminders. Both are re-read first, because this pass's own writes are not in the
+    /// snapshots. Skipped after any failure, so a half-finished move never looks like an empty container.
+    func cleanUpEmptyHeadingsAndSections(lists: [ReminderList]) async {
+        guard report.failures == 0 else { return }
+        // Every container this app created that no list targets any more (a list re-pointed elsewhere,
+        // removed, or items moved out by hand) and that is empty goes too, so settings changes leave no
+        // remnants. removeOwnedIfEmpty refuses targeted, non-empty, and user-created containers.
+        if !store.ownedThings.isEmpty, let fresh = try? await things.refresh() {
+            snapshot = fresh.snapshot
+            for entry in store.ownedThings {
+                await removeOwnedIfEmpty(entry.kind, id: entry.id,
+                                         why: entry.kind == .heading ? "it held no to-dos" : "no list syncs to it and it is empty")
+            }
+        }
+        let known = Set(lists.map(\.id))
+        let candidates = store.ownedSections.filter { sec in
+            known.contains(sec.listId) && !groceryLists.contains(sec.listId) && (activeById[sec.listId].map(sectionsActive) ?? false)
+        }
+        guard !candidates.isEmpty,
+              let fresh = try? await reminders.reminders(inLists: Array(Set(candidates.map(\.listId)))) else { return }
+        for sec in candidates {
+            let occupied = fresh.contains { $0.listId == sec.listId && Fingerprint.groupKey($0.section) == Fingerprint.groupKey(sec.name) }
+            guard !occupied else { continue }
+            let listTitle = activeById[sec.listId]?.listTitle ?? sec.listId
+            do {
+                try await reminders.deleteSection(name: sec.name, listId: sec.listId)
+                store.ownedSections.removeAll { $0.matches(listId: sec.listId, name: sec.name) }
+                report.removedContainers += 1
+                log(.change, "Removed empty Reminders section \"\(sec.name)\" from \"\(listTitle)\" (created by this app)")
+            } catch {
+                log(.warning, "Could not remove empty Reminders section \"\(sec.name)\": \(error.localizedDescription)")
+            }
         }
     }
 

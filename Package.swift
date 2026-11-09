@@ -12,6 +12,8 @@ let package = Package(
     targets: [
         .target(name: "SyncCore"),
         .executableTarget(name: "ThingsRemindersSync", dependencies: ["SyncCore"]),
+        // Maintenance CLI (not bundled into the app): runs teardown and completed-copy removal headlessly.
+        .executableTarget(name: "trs-admin", dependencies: ["SyncCore"]),
         .testTarget(name: "SyncCoreTests", dependencies: ["SyncCore"]),
     ]
 )

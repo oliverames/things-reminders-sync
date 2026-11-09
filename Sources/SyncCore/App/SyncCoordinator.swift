@@ -86,6 +86,9 @@ public final class SyncCoordinator {
     @ObservationIgnored private var observerTasks: [Task<Void, Never>] = []
     @ObservationIgnored private var wakeObserver: NSObjectProtocol?
     @ObservationIgnored private var userPaused = false
+    /// The latest Things snapshot and reminders, for the teardown previews.
+    @ObservationIgnored private var lastSnapshot = ThingsSnapshot()
+    @ObservationIgnored private var lastReminders: [ReminderItem] = []
     /// Set when the deletion safety limit held deletions back; cleared by a forced (Sync Now) pass.
     @ObservationIgnored private var safetyHold = false
 
@@ -192,6 +195,83 @@ public final class SyncCoordinator {
         if let things = thingsBackend, let result = try? await things.refresh() { applyCatalog(result.snapshot) }
     }
 
+    // MARK: Teardown (docs/SPEC.md, "Ownership ledger")
+
+    /// What stopping syncing `listId` would remove, from the data of the last pass. Counts only the app's own copies
+    /// and the containers and sections it created; originals are listed as kept. An estimate: the real run re-reads both sides.
+    public func teardownPreview(listId: String) -> TeardownPreview {
+        Teardown.preview(listId: listId, config: config, store: links, snapshot: lastSnapshot, reminders: lastReminders,
+                         groceryLists: Set(reminderLists.filter(\.isGroceries).map(\.id)))
+    }
+
+    /// Stops syncing a list. Always disables the mapping and drops its links (both sides keep everything).
+    /// With `removeCopies` the app's own copies are removed first (Things to-dos to the Trash, reminders to Recently
+    /// Deleted; items that existed on both sides stay), then the app-created containers and sections left empty.
+    /// `removeMapping` also removes the mapping from the configuration. Runs between sync passes, never during one,
+    /// and is not held back by the deletion safety limit: the user confirmed it.
+    public func stopSyncing(listId: String, removeCopies: Bool, removeMapping: Bool) async {
+        guard let things = thingsBackend, remindersAccess == .granted else { return }
+        await exclusive {
+            let sectionLists = config.mappings.filter { $0.enabled && !$0.awaitingTarget && $0.mode == .project && $0.syncSections }.map(\.id)
+            await deps.remctl?.setSectionLists(sectionLists + [listId])   // the list's sections must be readable to find empty ones
+            do {
+                let engine = SyncEngine(things: things, reminders: deps.reminders)
+                let report = try await engine.teardown(config: config, links: links, listId: listId,
+                                                       removeCopies: removeCopies, removeMapping: removeMapping)
+                applyTeardown(report, listId: listId, removeMapping: removeMapping)
+            } catch {
+                append([SyncLogEntry(level: .error, message: "Could not stop syncing: \(error.localizedDescription)")])
+                persist()
+            }
+            await applyRemindersConfig()
+        }
+        await request(PendingWork(full: true))
+    }
+
+    /// Copies the app made because "include completed on first link" was on (see `removeCompletedCopies`).
+    public func completedCopiesPreview() -> CompletedCopiesPreview {
+        let c = Teardown.copies(of: links.links, snapshot: lastSnapshot, reminders: lastReminders, onlyCompleted: true)
+        return CompletedCopiesPreview(thingsTodosToTrash: c.things.count, remindersToDelete: c.reminders.count)
+    }
+
+    /// Removes the completed copies (Things to-dos to the Trash, reminders to Recently Deleted); originals stay.
+    public func removeCompletedCopies() async {
+        guard let things = thingsBackend, remindersAccess == .granted else { return }
+        await exclusive {
+            do {
+                let engine = SyncEngine(things: things, reminders: deps.reminders)
+                let report = try await engine.removeCompletedCopies(config: config, links: links)
+                append(report.log)
+                links = Self.pruneLinks(report.links, to: config)
+                lastSnapshot = report.snapshot; lastReminders = report.reminders
+                applyCatalog(report.snapshot)
+                linkedCounts = links.countsByMapping
+                persist()
+            } catch {
+                append([SyncLogEntry(level: .error, message: "Could not remove completed copies: \(error.localizedDescription)")])
+                persist()
+            }
+        }
+        await request(PendingWork(full: true))
+    }
+
+    private func applyTeardown(_ report: TeardownReport, listId: String, removeMapping: Bool) {
+        // Keep settings the user changed meanwhile; take only what this teardown did to the list's mapping.
+        if let i = config.mappings.firstIndex(where: { $0.id == listId }) {
+            if removeMapping && report.completed { config.mappings.remove(at: i) }
+            else {
+                config.mappings[i].enabled = false
+                if let done = report.config.mappings.first(where: { $0.id == listId }), done.targetId == nil { config.mappings[i].targetId = nil }
+            }
+        }
+        links = Self.pruneLinks(report.links, to: config)
+        append(report.log)
+        lastSnapshot = report.snapshot; lastReminders = report.reminders
+        applyCatalog(report.snapshot)
+        linkedCounts = links.countsByMapping
+        persist()
+    }
+
     // MARK: State
 
     /// Pushes the RemCTL path, poll interval, and the enabled lists to the backend.
@@ -290,16 +370,27 @@ public final class SyncCoordinator {
     private func request(_ work: PendingWork) async {
         guard canSync else { return }
         pending.merge(work)
-        if running {
-            await withCheckedContinuation { waiters.append($0) }
-            return
-        }
+        while running { await withCheckedContinuation { waiters.append($0) } }
+        guard !pending.isEmpty, canSync else { return }   // another caller already ran this work
         running = true
         while !pending.isEmpty, canSync {
             let next = pending
             pending = PendingWork()
             await execute(next)
         }
+        finishRunning()
+    }
+
+    /// Runs `body` alone: after the running pass has finished and before the next one starts. Passes requested
+    /// meanwhile wait, then run.
+    private func exclusive(_ body: () async -> Void) async {
+        while running { await withCheckedContinuation { waiters.append($0) } }
+        running = true
+        await body()
+        finishRunning()
+    }
+
+    private func finishRunning() {
         running = false
         let ready = waiters
         waiters = []
@@ -323,7 +414,8 @@ public final class SyncCoordinator {
             phase = .syncing
             let engine = SyncEngine(things: things, reminders: deps.reminders)
             let startedWith = config
-            let report = try await engine.sync(config: startedWith, links: links, scope: scope, forceDeletions: work.force)
+            let report = try await engine.sync(config: startedWith, links: links, scope: scope, forceDeletions: work.force,
+                                               backfillLog: links.ledgerBackfilled ? nil : log)
             apply(report, startedWith: startedWith, forced: work.force)
         } catch {
             let message = error.localizedDescription
@@ -371,6 +463,7 @@ public final class SyncCoordinator {
         reminderLists = report.reminderLists
         Task { await applyRemindersConfig() }
         applyCatalog(report.snapshot)
+        lastSnapshot = report.snapshot; lastReminders = report.reminders
         lastSync = Date()
         if forced { safetyHold = false }
         if report.deletionsHeld { safetyHold = true }

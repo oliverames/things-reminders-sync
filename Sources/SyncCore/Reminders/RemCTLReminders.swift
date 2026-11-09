@@ -29,6 +29,8 @@ public actor RemCTLReminders: RemindersBackend {
     private var groceryLists: Set<String> = []
     /// Section names per list id, from `get_list`. Dropped whenever the lists are re-read, so it lives for one pass or poll.
     private var sectionCache: [String: [(id: String, name: String)]] = [:]
+    /// Sections created by writes since the engine last asked (`takeCreatedSections`).
+    private var createdSections: [CreatedReminderSection] = []
     private var executablePath: String?
     private var titleToIds: [String: [String]] = [:]
     private var idToTitle: [String: String] = [:]
@@ -124,7 +126,9 @@ public actor RemCTLReminders: RemindersBackend {
             // The reminder exists but the private section step failed: finish with an update, never create twice.
             var retry: [String: JSONValue] = ["reminder_id": .number(Double(id)), "private": true]
             if let extra = try? await sectionArguments(sectionName, listId: listId) { retry.merge(extra) { $1 } }
-            _ = try? await transport.callTool("update_reminder", arguments: retry)
+            if (try? await transport.callTool("update_reminder", arguments: retry)) != nil { noteCreated(retry, sectionName, listId) }
+        } else if let sectionName {
+            noteCreated(args, sectionName, listId)
         }
         if sectionName != nil { sectionCache[listId] = nil }
         if completed {
@@ -170,6 +174,7 @@ public actor RemCTLReminders: RemindersBackend {
                 var args: [String: JSONValue] = ["reminder_id": .number(Double(current)), "private": true]
                 args.merge(try await sectionArguments(name, listId: listId)) { $1 }
                 _ = try await transport.callTool("update_reminder", arguments: args)
+                noteCreated(args, name, listId)
                 sectionCache[listId] = nil
             }
         }
@@ -226,6 +231,30 @@ public actor RemCTLReminders: RemindersBackend {
         if hits.count > 1, !hits[0].id.isEmpty { return ["section_id": .string(hits[0].id)] }
         if let hit = hits.first { return ["section": .string(hit.name)] }
         return ["new_section": .string(name)]
+    }
+
+    /// Records a section the write just created (`new_section` was sent and the call succeeded).
+    private func noteCreated(_ args: [String: JSONValue], _ name: String, _ listId: String) {
+        guard args.keys.contains("new_section") else { return }
+        let c = CreatedReminderSection(listId: listId, name: name)
+        if !createdSections.contains(c) { createdSections.append(c) }
+    }
+
+    public func takeCreatedSections() async -> [CreatedReminderSection] {
+        let taken = createdSections
+        createdSections = []
+        return taken
+    }
+
+    /// `remctl section-delete NAME --list-id N --force --private --json`. A section that is already gone is fine.
+    public func deleteSection(name: String, listId: String) async throws {
+        guard let numeric = Int(listId) else { throw RemCTLError.tool("Reminders list not found") }
+        do {
+            _ = try await transport.runCLI(["section-delete", name, "--list-id", String(numeric), "--force", "--private", "--json"])
+        } catch let error as RemCTLError where error.message.lowercased().contains("not found") {
+            // already gone
+        }
+        sectionCache[listId] = nil
     }
 
     private func listIdOfReminder(_ id: Int) async throws -> String? {

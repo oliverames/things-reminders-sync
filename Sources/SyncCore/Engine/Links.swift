@@ -93,11 +93,33 @@ public struct LinkRecord: Codable, Hashable, Sendable, Identifiable {
     public var mappingId: String
     public var fingerprint: Fingerprint
     public var lastSynced: Date
+    /// Which side is the app's own copy: `.things` when the engine created the to-do from a reminder,
+    /// `.reminders` when it created the reminder from a to-do, nil when both existed before (paired by title,
+    /// or unknown). Only a copy is ever removed when the user stops syncing a list.
+    public var copySide: Side?
+    /// True when the copy was made because "include completed on first link" brought a completed item over.
+    public var copiedCompleted: Bool
 
     public init(id: UUID = UUID(), reminderId: String, reminderExternalId: String? = nil, thingsId: String,
-                mappingId: String, fingerprint: Fingerprint, lastSynced: Date = Date()) {
+                mappingId: String, fingerprint: Fingerprint, lastSynced: Date = Date(),
+                copySide: Side? = nil, copiedCompleted: Bool = false) {
         self.id = id; self.reminderId = reminderId; self.reminderExternalId = reminderExternalId
         self.thingsId = thingsId; self.mappingId = mappingId; self.fingerprint = fingerprint; self.lastSynced = lastSynced
+        self.copySide = copySide; self.copiedCompleted = copiedCompleted
+    }
+
+    /// Links saved before the ownership ledger decode with no copy side.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        reminderId = try c.decode(String.self, forKey: .reminderId)
+        reminderExternalId = try c.decodeIfPresent(String.self, forKey: .reminderExternalId)
+        thingsId = try c.decode(String.self, forKey: .thingsId)
+        mappingId = try c.decode(String.self, forKey: .mappingId)
+        fingerprint = try c.decode(Fingerprint.self, forKey: .fingerprint)
+        lastSynced = try c.decode(Date.self, forKey: .lastSynced)
+        copySide = try c.decodeIfPresent(Side.self, forKey: .copySide)
+        copiedCompleted = try c.decodeIfPresent(Bool.self, forKey: .copiedCompleted) ?? false
     }
 }
 
@@ -114,6 +136,12 @@ public struct LinkStore: Codable, Hashable, Sendable {
     /// Links dropped because an item moved out of scope. When both items are back in scope the link is
     /// restored (and syncs from its old fingerprint); if one item disappears, the other is freed.
     public var parkedLinks: [LinkRecord] = []
+    /// Things projects, areas, tags, and headings this app created (ownership ledger). Only these are ever removed.
+    public var ownedThings: [OwnedThingsContainer] = []
+    /// Reminders sections this app created.
+    public var ownedSections: [OwnedReminderSection] = []
+    /// Set once the one-time ledger inference for data created before the ledger existed has run.
+    public var ledgerBackfilled = false
 
     public init(links: [LinkRecord] = [], linkedMappings: [String: String] = [:],
                 detachedThingsIds: Set<String> = [], detachedReminderIds: Set<String> = []) {
@@ -128,6 +156,9 @@ public struct LinkStore: Codable, Hashable, Sendable {
         detachedThingsIds = try c.decodeIfPresent(Set<String>.self, forKey: .detachedThingsIds) ?? []
         detachedReminderIds = try c.decodeIfPresent(Set<String>.self, forKey: .detachedReminderIds) ?? []
         parkedLinks = try c.decodeIfPresent([LinkRecord].self, forKey: .parkedLinks) ?? []
+        ownedThings = try c.decodeIfPresent([OwnedThingsContainer].self, forKey: .ownedThings) ?? []
+        ownedSections = try c.decodeIfPresent([OwnedReminderSection].self, forKey: .ownedSections) ?? []
+        ledgerBackfilled = try c.decodeIfPresent(Bool.self, forKey: .ledgerBackfilled) ?? false
     }
 
     public func count(mappingId: String) -> Int { links.reduce(0) { $0 + ($1.mappingId == mappingId ? 1 : 0) } }

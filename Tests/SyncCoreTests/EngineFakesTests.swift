@@ -83,6 +83,13 @@ actor FakeThings: ThingsBackend {
     }
     func createArea(title: String) async throws -> String { let id = nextId("A"); areas[id] = ThingsArea(id: id, title: title); return id }
     func createTag(title: String, parentId: String?) async throws -> String { let id = nextId("G"); tags[id] = ThingsTag(id: id, title: title); return id }
+    private(set) var deletedAreas: [String] = []
+    private(set) var deletedTags: [String] = []
+    func deleteArea(id: String) async throws { deletedAreas.append(id); areas[id] = nil }
+    func deleteTag(id: String) async throws { deletedTags.append(id); tags[id] = nil }
+    func trashedIds() -> Set<String> { Set(tasks.values.filter(\.trashed).map(\.id)) }
+    /// Every id passed to `updateTodo` with `trashed == true`.
+    func trashCalls() -> [String] { updates.filter { $0.1.trashed == true }.map(\.0) }
 }
 
 actor FakeReminders: RemindersBackend {
@@ -94,6 +101,19 @@ actor FakeReminders: RemindersBackend {
     var clearsSections = false
     var groceryLists: Set<String> = []
     private(set) var sectionWrites: [(id: String, section: String)] = []
+    /// Sections that exist per list, so a write with an unknown name creates one (and reports it) like RemCTL.
+    var sectionNames: [String: Set<String>] = [:]
+    private var createdSections: [CreatedReminderSection] = []
+    private(set) var sectionDeletes: [String] = []
+    func addSection(_ list: String, _ name: String) { sectionNames[list, default: []].insert(name.lowercased()) }
+    private func noteSection(_ list: String, _ name: String) {
+        if sectionNames[list, default: []].insert(name.lowercased()).inserted { createdSections.append(CreatedReminderSection(listId: list, name: name)) }
+    }
+    func takeCreatedSections() async -> [CreatedReminderSection] { defer { createdSections = [] }; return createdSections }
+    func deleteSection(name: String, listId: String) async throws {
+        sectionDeletes.append("\(listId):\(name)")
+        sectionNames[listId]?.remove(name.lowercased())
+    }
 
     init(lists: [String]) { for l in lists { listsById[l] = ReminderList(id: l, title: l) } }
     func setGrocery(_ id: String) { listsById[id]?.isGroceries = true; groceryLists.insert(id) }
@@ -114,6 +134,7 @@ actor FakeReminders: RemindersBackend {
                 section: String?) async throws -> ReminderItem {
         counter += 1
         if section != nil { sectionWrites.append(("new", section!)) }
+        if let section, !groceryLists.contains(listId) { noteSection(listId, section) }
         let r = ReminderItem(id: "R\(counter)", externalId: "X\(counter)", listId: listId, title: title, notes: notes, due: due,
                              completed: completed, completionDate: completed ? (completionDate ?? Date()) : nil, lastModified: Date(),
                              section: groceryLists.contains(listId) ? nil : section)
@@ -129,7 +150,7 @@ actor FakeReminders: RemindersBackend {
         if let c = p.completed { r.completed = c; r.completionDate = c ? (p.completionDate ?? Date()) : nil }
         if let l = p.listId { r.listId = l; r.section = nil }   // sections belong to a list
         if let sec = p.section, !groceryLists.contains(r.listId) {
-            if let name = sec { r.section = name; sectionWrites.append((id, name)) }
+            if let name = sec { r.section = name; sectionWrites.append((id, name)); noteSection(r.listId, name) }
             else if clearsSections { r.section = nil; sectionWrites.append((id, "")) }
         }
         r.lastModified = Date()

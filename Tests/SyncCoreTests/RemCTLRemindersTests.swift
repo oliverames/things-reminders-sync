@@ -105,6 +105,15 @@ actor FakeRemCTL: RemCTLTransport {
                   let title = lists.first(where: { $0["id"]?.int == id })?["title"]?.string else { throw RemCTLError.tool("unexpected cli \(arguments)") }
             return .array(rows.keys.sorted().compactMap { rows[$0] }.filter { $0["list"]?.string == title })
         }
+        if arguments.first == "section-delete" {
+            // ["section-delete", NAME, "--list-id", id, "--force", "--private", "--json"]
+            guard arguments.count == 7, let id = Int(arguments[3]), arguments[4...] == ["--force", "--private", "--json"] else {
+                throw RemCTLError.tool("unexpected cli \(arguments)")
+            }
+            guard listSections[id]?.contains(arguments[1]) == true else { throw RemCTLError.tool("Error: section not found") }
+            listSections[id]?.removeAll { $0 == arguments[1] }
+            return ["status": "deleted"]
+        }
         if arguments == ["sections", "--json"] {
             // Like the real command: list title -> section names (strings), only for lists that have sections.
             var byList: [String: [JSONValue]] = [:]

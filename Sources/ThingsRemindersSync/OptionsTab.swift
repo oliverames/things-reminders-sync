@@ -6,6 +6,8 @@ struct OptionsTab: View {
     let coordinator: SyncCoordinator
     @State private var draft = SyncConfig()
     @State private var saving = false
+    /// Counts of completed copies, set while the user decides what to do with them (turning the toggle off).
+    @State private var completedCopies: CompletedCopiesPreview?
 
     /// Only the option fields; list mappings are edited on the Lists tab.
     private static func options(_ c: SyncConfig) -> [Int] {
@@ -48,6 +50,16 @@ struct OptionsTab: View {
             }
         }
         .formStyle(.grouped)
+        .confirmationDialog("Completed copies", isPresented: Binding(get: { completedCopies != nil }, set: { if !$0 { completedCopies = nil } }),
+                            titleVisibility: .visible, presenting: completedCopies) { preview in
+            Button("Keep Them") { save(removingCompletedCopies: false) }
+            Button("Remove \(preview.count) completed cop\(preview.count == 1 ? "y" : "ies")", role: .destructive) {
+                save(removingCompletedCopies: true)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("Completed to-dos and reminders this app copied over on first link can be removed. Things copies go to the Trash and reminders to Recently Deleted. Items that existed on both sides are kept.")
+        }
         .onAppear { draft = coordinator.config }
         .onChange(of: coordinator.config) { old, new in
             // Follow outside changes, but never discard edits the user has not saved yet.
@@ -56,6 +68,14 @@ struct OptionsTab: View {
     }
 
     private func save() {
+        if coordinator.config.includeCompletedOnFirstLink && !draft.includeCompletedOnFirstLink {
+            let preview = coordinator.completedCopiesPreview()
+            if preview.count > 0 { completedCopies = preview; return }
+        }
+        save(removingCompletedCopies: false)
+    }
+
+    private func save(removingCompletedCopies: Bool) {
         var merged = coordinator.config
         merged.pollSeconds = draft.pollSeconds
         merged.remindersPollSeconds = draft.remindersPollSeconds
@@ -63,7 +83,11 @@ struct OptionsTab: View {
         merged.includeCompletedOnFirstLink = draft.includeCompletedOnFirstLink
         merged.propagateDeletes = draft.propagateDeletes
         saving = true
-        Task { await coordinator.updateConfig(merged); saving = false }
+        Task {
+            await coordinator.updateConfig(merged)
+            if removingCompletedCopies { await coordinator.removeCompletedCopies() }
+            saving = false
+        }
     }
 }
 

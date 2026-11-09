@@ -183,16 +183,48 @@ Safety limits: if one pass would delete or trash more than 10 items or more than
 links, skip those deletions, log an `.error`, and set phase to `.error` until the user runs Sync
 Now. Never empty the Things Trash. Never touch Reminders lists that are not mapped.
 
+## Ownership ledger and cleanup
+
+Nothing the app did not create is ever removed. `links.json` carries a ledger (old files decode without it):
+
+- `ownedThings`: Things projects, areas, tags, and headings the app created (id, kind, mapping id, title, date), recorded in
+  `ensureTargets` and when a heading is created for a section.
+- `ownedSections`: Reminders sections RemCTL created (a `new_section` write that succeeded; the backend reports them through
+  `takeCreatedSections`).
+- Per link: `copySide` (`.things` when the engine created the to-do from a reminder, `.reminders` when it created the reminder
+  from a to-do, nil for title-paired originals or when unknown) and `copiedCompleted` (the copy was made because
+  "include completed on first link" brought a completed item over). Parked links keep both.
+- `ledgerBackfilled`: set after the one-time inference (`LedgerBackfill`) that fills the ledger for data created before it
+  existed, from the activity log, the links, the config, the Things snapshot and the reminders. Ambiguity records nothing:
+  an unknown link stays `copySide == nil` (original, never deleted), an unknown container stays unrecorded.
+
+Cleanup, always limited to ledger entries and never to a container a mapping still targets:
+
+- **Retarget:** after linked to-dos move to the new target, an app-created old project/heading (Trash), area, or tag (deleted)
+  that holds nothing left is removed. "Empty" means no non-trashed to-dos, open or done (projects: directly or under a heading;
+  areas: no projects either; tags: none carrying it and no child tags).
+- **Full pass end** (only when the pass had no failures): app-created headings with no non-trashed to-dos go to the Trash, and
+  app-created Reminders sections holding no reminders are deleted (`remctl section-delete`). Both are re-read first.
+  Groceries lists are skipped.
+- **Stop syncing a list** (`SyncCoordinator.stopSyncing`, previewed by `teardownPreview`): always disables the mapping and drops
+  its links, parked links, first-link marker and detached marks. With `removeCopies`: each `copySide == .things` to-do goes to
+  the Trash (never deleted), each `copySide == .reminders` reminder is deleted (Recently Deleted), originals stay, then the
+  mapping's empty app-created containers and sections are removed. `removeMapping` also drops the mapping. Not held back by the
+  deletion safety limit (the user confirmed it), serialized with sync passes, every removal logged. If anything fails nothing is
+  dropped, so it can be repeated. Parked pairs are dropped, never removed.
+- **Include completed off** (`completedCopiesPreview` / `removeCompletedCopies`): the same side rules for links with
+  `copiedCompleted`.
+
 ## App
 
 - Menu bar only (`LSUIElement`). Menu: status line (phase, last sync time), Sync Now, Pause/Resume,
   Settings…, Quit.
 - Settings window tabs: **Account** (Things Cloud email/password, verify, sign out; RemCTL
-  status row with a Check Again button and an optional RemCTL path), **Lists** (every Reminders list with an enable toggle, a mode
+  status row with a Check Again button and an optional RemCTL path), **Lists** (saving a list off asks "Keep Everything" or "Remove N synced copies…"; each list has "Remove list from sync…"; every Reminders list with an enable toggle, a mode
   picker (Project, Area, Tag, Heading), a target picker of existing Things projects/areas/tags plus "New …" with a title,
   and the linked-item count; Heading mode picks the project first, then one of its headings or "New …"; Project mode has a
   "Sync sections as headings" toggle), **Options** (Things poll interval, Reminders poll interval, reconcile interval, include completed on first
-  link, propagate deletes, open at login via `SMAppService.mainApp`), **Activity** (log, newest
+  link (saving it off offers to remove the completed copies), propagate deletes, open at login via `SMAppService.mainApp`), **Activity** (log, newest
   first, with levels).
 - Credentials in the Keychain (generic password, service `com.oliverames.ThingsRemindersSync`).
 - Bundle id `com.oliverames.ThingsRemindersSync`, display name "Things Reminders Sync",

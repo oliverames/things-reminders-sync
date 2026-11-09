@@ -232,4 +232,22 @@ public actor ThingsCloudClient: ThingsBackend {
             return id
         }
     }
+
+    /// Permanently deletes an area (t 2). A missing area is already gone.
+    public func deleteArea(id: String) async throws {
+        try await withLock {
+            if database == nil || database?.areas[id] == nil { _ = try await refreshLocked() }
+            guard database?.areas[id] != nil else { return }
+            try await commit([id: ThingsChange(t: 2, e: ThingsEntity.area, p: [:])])
+        }
+    }
+
+    /// Permanently deletes a tag (t 2). A missing tag is already gone.
+    public func deleteTag(id: String) async throws {
+        try await withLock {
+            if database == nil || database?.tags[id] == nil { _ = try await refreshLocked() }
+            guard database?.tags[id] != nil else { return }
+            try await commit([id: ThingsChange(t: 2, e: ThingsEntity.tag, p: [:])])
+        }
+    }
 }

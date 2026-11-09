@@ -57,6 +57,15 @@ private struct ListRow: View {
     /// The saved mapping the draft started from, for a field-wise merge on Save.
     @State private var draftBase: ListMapping?
     @State private var saving = false
+    /// A save that turns the list off (or removes it) waiting for the user to choose what happens to the app's copies.
+    @State private var stopRequest: StopRequest?
+
+    private struct StopRequest: Identifiable {
+        let id = UUID()
+        var config: SyncConfig?          // the config to save first; nil when only removing the mapping
+        var preview: TeardownPreview
+        var removeMapping: Bool
+    }
 
     private var saved: ListMapping {
         coordinator.config.mappings.first { $0.id == list.id }
@@ -73,6 +82,29 @@ private struct ListRow: View {
 
     private func revert() { draft = nil; draftBase = nil; creatingNew = false }
 
+    private func commitStop(_ request: StopRequest, removeCopies: Bool) {
+        saving = true
+        Task {
+            if let config = request.config { await coordinator.updateConfig(config) }
+            await coordinator.stopSyncing(listId: list.id, removeCopies: removeCopies, removeMapping: request.removeMapping)
+            saving = false
+            revert()
+        }
+    }
+
+    private func removeLabel(_ p: TeardownPreview) -> String {
+        if p.copyCount > 0 { return "Remove \(p.copyCount) synced cop\(p.copyCount == 1 ? "y" : "ies")…" }
+        return "Remove \(p.containerCount) empty folder\(p.containerCount == 1 ? "" : "s") made by this app…"
+    }
+
+    private func stopMessage(_ p: TeardownPreview) -> String {
+        var text = "Things copies go to the Trash and reminders to Recently Deleted. Items that existed on both sides are kept"
+        if p.originalsKept > 0 { text += " (\(p.originalsKept))" }
+        text += "."
+        if p.containerCount > 0 { text += " Empty projects, headings, or sections this app created are removed too." }
+        return text
+    }
+
     private func save() {
         guard var updated = draft else { return }
         let latest = saved
@@ -87,6 +119,11 @@ private struct ListRow: View {
             config.mappings[index] = updated
         } else {
             config.mappings.append(updated)
+        }
+        if saved.enabled && !updated.enabled {
+            // Turning a list off: ask what happens to the copies this app made.
+            stopRequest = StopRequest(config: config, preview: coordinator.teardownPreview(listId: list.id), removeMapping: false)
+            return
         }
         saving = true
         Task {
@@ -133,6 +170,17 @@ private struct ListRow: View {
             }
         }
         .disabled(!list.allowsModifications && !current.enabled)
+        .confirmationDialog(stopRequest.map { $0.removeMapping ? "Remove “\(list.title)” from sync" : "Stop syncing “\(list.title)”" } ?? "",
+                            isPresented: Binding(get: { stopRequest != nil }, set: { if !$0 { stopRequest = nil } }),
+                            titleVisibility: .visible, presenting: stopRequest) { request in
+            Button("Keep Everything") { commitStop(request, removeCopies: false) }
+            if request.preview.copyCount > 0 || request.preview.containerCount > 0 {
+                Button(removeLabel(request.preview), role: .destructive) { commitStop(request, removeCopies: true) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { request in
+            Text(stopMessage(request.preview))
+        }
 
         if !list.allowsModifications {
             Text("This list is read-only in Reminders.").font(.callout).foregroundStyle(.secondary)
@@ -210,6 +258,12 @@ private struct ListRow: View {
                     .font(.callout).foregroundStyle(.secondary)
             }
         }
+        if coordinator.config.mappings.contains(where: { $0.id == list.id }) {
+            Button("Remove list from sync…", role: .destructive) {
+                stopRequest = StopRequest(config: nil, preview: coordinator.teardownPreview(listId: list.id), removeMapping: true)
+            }
+            .disabled(saving)
+        }
         if isDirty {
             HStack {
                 Label(saveSummary, systemImage: "pencil.circle").font(.callout).foregroundStyle(.secondary)
@@ -223,7 +277,7 @@ private struct ListRow: View {
 
     private var saveSummary: String {
         guard let draft else { return "" }
-        if !draft.enabled { return saved.enabled ? "Stops syncing this list" : "Unsaved changes" }
+        if !draft.enabled { return saved.enabled ? "Stops syncing this list; you choose what happens to its copies" : "Unsaved changes" }
         if !saved.enabled { return draft.targetId == nil && !draft.awaitingTarget ? "Starts syncing; creates \"\(draft.targetTitle)\"" : "Starts syncing this list" }
         if draft.mode != saved.mode || draft.targetId != saved.targetId || draft.parentProjectId != saved.parentProjectId {
             return draft.awaitingTarget && draft.targetId == nil ? "Pauses until a target is chosen" : "Moves linked to-dos to the new target"

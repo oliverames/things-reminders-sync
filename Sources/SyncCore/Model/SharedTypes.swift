@@ -168,6 +168,10 @@ public protocol ThingsBackend: Sendable {
     func createHeading(title: String, projectId: String) async throws -> String
     func createArea(title: String) async throws -> String
     func createTag(title: String, parentId: String?) async throws -> String
+    /// Permanently deletes an area. Only used to remove an area this app created once it holds nothing.
+    func deleteArea(id: String) async throws
+    /// Permanently deletes a tag. Only used to remove a tag this app created once nothing carries it.
+    func deleteTag(id: String) async throws
 }
 
 // MARK: - Reminders
@@ -248,6 +252,23 @@ public protocol RemindersBackend: Sendable {
     func delete(id: String) async throws
     /// Yields when the Reminders content the engine watches changed (RemCTL polls; there is no push).
     func changes() -> AsyncStream<Void>
+    /// Sections the backend itself created (a write with a section name the list did not have) since the last call.
+    /// The engine records them as app-created so it may remove them again once they are empty.
+    func takeCreatedSections() async -> [CreatedReminderSection]
+    /// Deletes a section of a list (the reminders in it must already be gone). A missing section is not an error.
+    func deleteSection(name: String, listId: String) async throws
+}
+
+/// A Reminders section the backend created while writing a reminder.
+public struct CreatedReminderSection: Hashable, Sendable {
+    public var listId: String
+    public var name: String
+    public init(listId: String, name: String) { self.listId = listId; self.name = name }
+}
+
+extension RemindersBackend {
+    public func takeCreatedSections() async -> [CreatedReminderSection] { [] }
+    public func deleteSection(name: String, listId: String) async throws {}
 }
 
 // MARK: - Configuration
