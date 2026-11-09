@@ -9,8 +9,12 @@ struct RemCTLError: LocalizedError, Sendable, Equatable {
     enum Kind: Sendable, Equatable {
         /// The executable is missing.
         case notInstalled
-        /// The process died, hung, or the pipe broke. The call may be retried once with a fresh process.
+        /// The process died, hung, or the pipe broke before a request was sent, or while a read was waiting.
+        /// Such a call is retried once with a fresh process.
         case transport
+        /// A write was sent and no answer came back (timeout, or the process died). The write may have landed, so it
+        /// is never sent again; the caller re-reads and checks.
+        case uncertain
         /// RemCTL answered with an error (tool `isError`, JSON-RPC error, bad output). Never retried.
         case tool
     }
@@ -20,6 +24,7 @@ struct RemCTLError: LocalizedError, Sendable, Equatable {
 
     static func transport(_ m: String) -> RemCTLError { RemCTLError(kind: .transport, message: m) }
     static func tool(_ m: String) -> RemCTLError { RemCTLError(kind: .tool, message: m) }
+    static func uncertain(_ m: String) -> RemCTLError { RemCTLError(kind: .uncertain, message: m) }
     static let notInstalled = RemCTLError(
         kind: .notInstalled,
         message: "RemCTL not found. Install it (~/bin/remctl, /opt/homebrew/bin/remctl, or /usr/local/bin/remctl) or set its path in Settings.")
@@ -166,8 +171,13 @@ private final class LockedData: @unchecked Sendable {
 // MARK: - JSON-RPC over a link
 
 /// MCP client for `remctl mcp serve`: lazy start, one handshake per process, requests serialized, responses
-/// routed by id, a timeout per request, and one restart-and-retry when the process dies or hangs.
+/// routed by id, a timeout per request, and one restart when the process dies or hangs. Only calls that are safe
+/// to repeat are sent again after the restart: reads, and calls that failed before their request line was written.
+/// A write that was sent and got no answer throws `.uncertain` instead (it may have landed).
 actor MCPTransport {
+    /// Tools that only read, so sending them twice is harmless.
+    static let readOnlyTools: Set<String> = ["lists", "get_reminder", "get_list"]
+
     private let connect: @Sendable () throws -> any RemCTLLink
     private let timeout: Duration
     private var link: (any RemCTLLink)?
@@ -178,6 +188,8 @@ actor MCPTransport {
     private var version: String?
     private var busy = false
     private var waiting: [CheckedContinuation<Void, Never>] = []
+    /// True once the current tool call's request line went out (from then on a write may have landed).
+    private var toolRequestWritten = false
 
     init(timeout: Duration = .seconds(30), connect: @escaping @Sendable () throws -> any RemCTLLink) {
         self.timeout = timeout
@@ -191,13 +203,17 @@ actor MCPTransport {
         defer { release() }
         var failure = RemCTLError.transport("RemCTL is not responding")
         for _ in 0..<2 {   // the original attempt plus one restart
+            toolRequestWritten = false
             do {
                 try await ensureSession()
-                let result = try await request("tools/call", ["name": .string(name), "arguments": .object(arguments)])
+                let result = try await request("tools/call", ["name": .string(name), "arguments": .object(arguments)], isToolCall: true)
                 return try Self.payload(of: result)
             } catch let error as RemCTLError where error.kind == .transport {
                 failure = error
                 teardown()
+                if toolRequestWritten, !Self.readOnlyTools.contains(name) {
+                    throw RemCTLError.uncertain("RemCTL did not confirm \(name) (\(error.message)); the change may have been made")
+                }
             } catch let error as RemCTLError {
                 if error.kind == .notInstalled { teardown() }
                 throw error
@@ -267,7 +283,7 @@ actor MCPTransport {
 
     // MARK: Requests
 
-    private func request(_ method: String, _ params: JSONValue) async throws -> JSONValue {
+    private func request(_ method: String, _ params: JSONValue, isToolCall: Bool = false) async throws -> JSONValue {
         guard let link else { throw RemCTLError.transport("RemCTL is not running") }
         nextId += 1
         let id = nextId
@@ -280,6 +296,7 @@ actor MCPTransport {
                 continuation.resume(returning: .failure((error as? RemCTLError) ?? .transport(error.localizedDescription)))
                 return
             }
+            if isToolCall { toolRequestWritten = true }
             timers[id] = Task { [timeout] in
                 try? await Task.sleep(for: timeout)
                 if !Task.isCancelled { self.timedOut(id) }

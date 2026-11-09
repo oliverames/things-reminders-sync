@@ -7,12 +7,14 @@ import Foundation
 public enum NoteFormatting {
     /// Splits a trailing link line off Things notes: the last non-empty line, when it is a single
     /// web or app URL and nothing else. Returns the notes unchanged and `nil` otherwise.
-    public static func splitTrailingURL(_ notes: String) -> (body: String, url: String?) {
+    /// `known` is a link the reminder already has: a last line equal to it is the link line whatever its form
+    /// (`mailto:sam@example.com` has no `://`, yet Reminders holds it as a rich link).
+    public static func splitTrailingURL(_ notes: String, known: String? = nil) -> (body: String, url: String?) {
         var lines = notes.components(separatedBy: "\n")
         while let last = lines.last, last.trimmingCharacters(in: .whitespaces).isEmpty { lines.removeLast() }
         guard let last = lines.last else { return (notes, nil) }
         let candidate = last.trimmingCharacters(in: .whitespaces)
-        guard isLinkURL(candidate) else { return (notes, nil) }
+        guard isLinkURL(candidate) || (known != nil && candidate == known) else { return (notes, nil) }
         lines.removeLast()
         while let l = lines.last, l.trimmingCharacters(in: .whitespaces).isEmpty { lines.removeLast() }
         return (lines.joined(separator: "\n"), candidate)
@@ -21,9 +23,30 @@ public enum NoteFormatting {
     /// Adds `url` as the last line of Things notes, after a blank line, unless the notes already
     /// contain it anywhere (inline links count).
     public static func appendingURL(_ url: String, to notes: String) -> String {
-        if notes.contains(url) { return notes }
+        if containsLink(url, in: notes) { return notes }
         let body = notes.trimmingCharacters(in: .whitespacesAndNewlines)
         return body.isEmpty ? url : body + "\n\n" + url
+    }
+
+    /// True when the notes hold `url` as a whole link, not merely as the start of a longer one: notes that mention
+    /// `https://example.com/login` do not contain the link `https://example.com`.
+    public static func containsLink(_ url: String, in notes: String) -> Bool {
+        guard !url.isEmpty else { return false }
+        var search = notes.startIndex..<notes.endIndex
+        while let hit = notes.range(of: url, range: search) {
+            if !continuesURL(notes[hit.upperBound...]) { return true }
+            search = hit.upperBound..<notes.endIndex
+        }
+        return false
+    }
+
+    /// True when the text right after a match is more of the same address.
+    private static func continuesURL(_ rest: Substring) -> Bool {
+        guard let next = rest.first else { return false }
+        let after = rest.dropFirst().first
+        // A closing slash, and a full stop or comma that ends a sentence, are not more address.
+        if next == "/" || next == "." || next == "," { return after.map { $0.isLetter || $0.isNumber || "/?#&=%-_~+:@".contains($0) } ?? false }
+        return next.isLetter || next.isNumber || "?#&=%-_~+:@".contains(next)
     }
 
     /// True for a single absolute URL with a scheme and no spaces: https://…, http://…, or an app

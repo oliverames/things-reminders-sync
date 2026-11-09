@@ -128,11 +128,16 @@ public struct LinkRecord: Codable, Hashable, Sendable, Identifiable {
     /// How a repeating item is paired; nil for plain pairs (including a plain pair on one occurrence of a Things
     /// template whose rule Reminders cannot hold).
     public var repeatMode: RepeatLinkMode?
+    /// `.reminderRepeats` pairs: the reminder has moved on to its next occurrence and the Things to-do for it is still
+    /// to be created (the create failed, or the pass was cut short). Saved as soon as the reminder has moved, so the
+    /// next pass creates the to-do instead of completing the reminder a second time.
+    public var awaitingReplacement: Bool
 
     public init(id: UUID = UUID(), reminderId: String, reminderExternalId: String? = nil, thingsId: String,
                 mappingId: String, fingerprint: Fingerprint, lastSynced: Date = Date(),
-                copySide: Side? = nil, copiedCompleted: Bool = false, repeatMode: RepeatLinkMode? = nil) {
-        self.repeatMode = repeatMode
+                copySide: Side? = nil, copiedCompleted: Bool = false, repeatMode: RepeatLinkMode? = nil,
+                awaitingReplacement: Bool = false) {
+        self.repeatMode = repeatMode; self.awaitingReplacement = awaitingReplacement
         self.id = id; self.reminderId = reminderId; self.reminderExternalId = reminderExternalId
         self.thingsId = thingsId; self.mappingId = mappingId; self.fingerprint = fingerprint; self.lastSynced = lastSynced
         self.copySide = copySide; self.copiedCompleted = copiedCompleted
@@ -151,6 +156,7 @@ public struct LinkRecord: Codable, Hashable, Sendable, Identifiable {
         copySide = try c.decodeIfPresent(Side.self, forKey: .copySide)
         copiedCompleted = try c.decodeIfPresent(Bool.self, forKey: .copiedCompleted) ?? false
         repeatMode = try c.decodeIfPresent(RepeatLinkMode.self, forKey: .repeatMode)
+        awaitingReplacement = try c.decodeIfPresent(Bool.self, forKey: .awaitingReplacement) ?? false
     }
 }
 

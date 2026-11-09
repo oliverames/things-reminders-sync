@@ -11,6 +11,8 @@ public enum ThingsCloudError: Error, LocalizedError, Equatable {
     case notFound(String)
     /// A server response could not be decoded.
     case decoding(String)
+    /// The item changed in Things after the pass read it; the write was not sent and the next pass retries.
+    case changedMeanwhile(String)
 
     public var errorDescription: String? {
         switch self {
@@ -25,6 +27,8 @@ public enum ThingsCloudError: Error, LocalizedError, Equatable {
             return "Not found in Things: \(what)."
         case let .decoding(detail):
             return "Could not read the Things Cloud response: \(detail)"
+        case let .changedMeanwhile(what):
+            return "\(what) changed in Things during the sync; it is retried on the next pass."
         }
     }
 }

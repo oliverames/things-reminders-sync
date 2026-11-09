@@ -57,9 +57,12 @@ func taskMatches(_ task: ThingsTask, _ m: ListMapping, in snapshot: ThingsSnapsh
 }
 
 extension ThingsSnapshot {
-    /// True when nothing non-trashed is left in the container. `ignoring` lists to-do ids to treat as already gone.
-    /// Projects: no to-dos (open or done), directly or under a heading. Areas: no to-dos or projects.
-    /// Tags: no task carries it and no tag nests under it. Headings: no to-dos under it.
+    /// True when nothing is left in the container. `ignoring` lists to-do ids to treat as already gone.
+    /// Projects and headings go to the Trash, so only non-trashed to-dos count: for a project, to-dos (open or done)
+    /// directly in it or under a heading; for a heading, to-dos under it.
+    /// Areas and tags are deleted for good, so what sits in the Things Trash counts too (a project restored later
+    /// would find no area): an area is empty when no to-do or project names it, a tag when no task or area carries
+    /// it and no tag nests under it.
     func isEmpty(_ kind: OwnedThingsContainer.Kind, id: String, ignoring gone: Set<String> = []) -> Bool {
         let live = tasks.values.filter { !$0.trashed && !gone.contains($0.id) }
         switch kind {
@@ -71,9 +74,10 @@ extension ThingsSnapshot {
                 return false
             }
         case .area:
-            return !live.contains { ($0.kind == .todo || $0.kind == .project) && $0.areaId == id }
+            return !tasks.values.contains { !gone.contains($0.id) && ($0.kind == .todo || $0.kind == .project) && $0.areaId == id }
         case .tag:
-            return !live.contains { $0.tagIds.contains(id) } && !tags.values.contains { $0.parentId == id }
+            return !tasks.values.contains { !gone.contains($0.id) && $0.tagIds.contains(id) }
+                && !tags.values.contains { $0.parentId == id } && !areas.values.contains { $0.tagIds.contains(id) }
         case .heading:
             return !live.contains { $0.kind == .todo && $0.headingId == id }
         }
@@ -120,7 +124,8 @@ extension ThingsSnapshot {
 }
 
 extension ThingsBackend {
-    /// Projects and headings go to the Trash (never permanently deleted); areas and tags have no Trash and are deleted.
+    /// Projects and headings go to the Trash (never permanently deleted); areas and tags have no Trash and are deleted
+    /// (the backend first takes the area or tag off every task that still names it).
     func removeContainer(_ c: OwnedThingsContainer) async throws {
         switch c.kind {
         case .project, .heading: try await updateTodo(id: c.id, patch: ThingsTodoPatch(trashed: true))

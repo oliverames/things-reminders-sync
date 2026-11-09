@@ -105,8 +105,12 @@ extension SyncPass {
                         }
                     } else if let rDue {
                         // A reschedule: move the open occurrence, or the template's next day when there is none.
-                        if let o = occurrences.first { plan.occurrenceWrites.append((o.id, ThingsTodoPatch(when: .some(rDue)))) }
-                        else { plan.thingsPatch.templateNext = rDue }
+                        if let o = occurrences.first {
+                            plan.occurrenceWrites.append((o.id, ThingsTodoPatch(when: .some(rDue))))
+                            // A new time on the same day is a new time for the series: without it on the template, Things
+                            // makes the next occurrence at the old time and that reads as a change back.
+                            if rDue.day == base.day, rDue.minutes != base.minutes { plan.thingsPatch.templateMinutes = .some(rDue.minutes) }
+                        } else { plan.thingsPatch.templateNext = rDue }
                     }
                     fp.due = rDue
                 case .things:
@@ -295,22 +299,100 @@ extension SyncPass {
         return plan
     }
 
-    /// After a repeating reminder advanced, creates the plain to-do for its new due day. The completed one stays
-    /// behind, detached. Nil when the reminder finished (no next occurrence).
+    /// After a repeating reminder advanced, creates the Things item for its new due day. The completed to-do stays
+    /// behind, detached. A rule Things can hold (a plain pair whose reminder was given a repeat later) gets a repeating
+    /// template from here on, and the pair becomes a template pair; any other rule gets a plain to-do again.
+    /// Nil when the reminder finished (no next occurrence).
     func replacePlainTodo(link: LinkRecord, task: ThingsTask, plan: MergePlan, mapping: ListMapping?,
-                          reminder r: ReminderItem) async throws -> (id: String, fingerprint: Fingerprint)? {
-        guard let mapping, !r.completed, r.due != nil else { return nil }
+                          reminder r: ReminderItem) async throws -> (id: String, fingerprint: Fingerprint, mode: RepeatLinkMode)? {
+        guard let mapping, !r.completed, let due = r.due else { return nil }
         let group = sectionsActive(mapping) ? Fingerprint.cleanGroup(plan.fingerprint.group) : nil
         let (placement, tags) = try await thingsPlacement(for: mapping, group: group)
         let fields = thingsFields(from: r)
-        let id = try await things.createTodo(ThingsTodoDraft(title: r.title, notes: fields.notes, when: r.due, placement: placement,
-                                                             tagIds: tags + fields.tagIds.filter { !tags.contains($0) }, checklist: fields.checklist))
-        store.detachedThingsIds.insert(task.id)
-        report.createdInThings += 1
-        log(.change, "Created Things to-do \"\(r.title)\" for the next occurrence")
+        var draft = ThingsTodoDraft(title: r.title, notes: fields.notes, when: due, placement: placement,
+                                    tagIds: tags + fields.tagIds.filter { !tags.contains($0) }, checklist: fields.checklist)
         var fp = fingerprint(forNewThingsFrom: r, group: group, fields: fields)
         fp.stuckSection = plan.fingerprint.stuckSection
-        return (id, fp)
+        var mode = RepeatLinkMode.reminderRepeats
+        if let rule = r.recurrence, ThingsRepeat.rr(for: rule, start: due.day) != nil {
+            draft.recurrence = rule
+            fp.rule = rule
+            mode = .template
+        }
+        let id = try await things.createTodo(draft)
+        store.detachedThingsIds.insert(task.id)
+        report.createdInThings += 1
+        log(.change, mode == .template ? "Created repeating Things to-do \"\(r.title)\" for the reminder's repeat rule"
+                                       : "Created Things to-do \"\(r.title)\" for the next occurrence")
+        return (id, fp, mode)
+    }
+
+    /// A `.reminderRepeats` pair whose reminder already moved on while the Things to-do for the new day is missing
+    /// (`awaitingReplacement`): creates it now. The reminder is not completed again.
+    func finishReplacement(_ link: LinkRecord, reminder: ReminderItem, task: ThingsTask, mapping: ListMapping) async {
+        do {
+            if task.status == .open { try await things.updateTodo(id: task.id, patch: ThingsTodoPatch(completed: true)) }
+            var updated = link
+            if let fresh = try await replacePlainTodo(link: link, task: task, plan: MergePlan(fingerprint: link.fingerprint),
+                                                      mapping: mapping, reminder: reminder) {
+                updated.thingsId = fresh.id; updated.fingerprint = fresh.fingerprint; updated.repeatMode = fresh.mode
+            } else {
+                updated.fingerprint.due = reminder.due
+                updated.fingerprint.completed = true
+            }
+            updated.awaitingReplacement = false
+            updated.mappingId = mapping.id
+            updated.lastSynced = Date()
+            replace(updated)
+        } catch {
+            fail("Could not create the next Things to-do for \"\(reminder.title)\": \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: A plain pair that became repeating in Things
+
+    /// The repeating template that took over from a plain linked to-do: the to-do's own template when Things turned it
+    /// into the first occurrence, or (when Things removed it because the first date is in the future) the only new,
+    /// unlinked template with the same title in the list's target. Nil unless its rule can be written to Reminders.
+    func successorTemplate(for link: LinkRecord, task: ThingsTask?, mapping: ListMapping) -> ThingsTask? {
+        let taken = Set(store.links.map(\.thingsId))
+        func usable(_ t: ThingsTask) -> Bool {
+            t.isTemplate && !t.trashed && thingsScope[t.id] != nil && !taken.contains(t.id)
+                && !store.detachedThingsIds.contains(t.id) && templateSyncs(t)
+        }
+        if let task, !task.trashed {
+            guard let tid = task.templateId, let template = snapshot.tasks[tid], usable(template) else { return nil }
+            return template
+        }
+        let title = link.fingerprint.title.lowercased()
+        let hits = snapshot.tasks.values.filter {
+            usable($0) && thingsScope[$0.id] == mapping.id && Fingerprint.normalize($0.title).lowercased() == title
+        }
+        return hits.count == 1 ? hits[0] : nil
+    }
+
+    /// Moves a plain pair onto the template: the reminder gets the rule (and the template's next day), and the link
+    /// points at the template. Without this the pair was dropped and the template got a second reminder.
+    func convertToTemplatePair(_ link: LinkRecord, reminder: ReminderItem, template: ThingsTask) async {
+        guard let rule = template.recurrence, let due = templateDue(template) else { return }
+        var patch = ReminderPatch(recurrence: .some(rule))
+        if reminder.due != due { patch.due = .some(due) }
+        do {
+            let r = try await reminders.update(id: reminder.id, patch: patch)
+            var updated = link
+            updated.reminderId = r.id; updated.reminderExternalId = r.externalId ?? link.reminderExternalId
+            updated.thingsId = template.id
+            updated.repeatMode = .template
+            updated.fingerprint.rule = rule
+            updated.fingerprint.due = r.due ?? due
+            updated.fingerprint.completed = false; updated.fingerprint.completionDay = nil
+            updated.lastSynced = Date()
+            replace(updated)
+            report.updatedInReminders += 1
+            log(.change, "\"\(template.title)\" now repeats in Things; its reminder repeats the same way")
+        } catch {
+            fail("Could not make reminder \"\(reminder.title)\" repeat: \(error.localizedDescription)")
+        }
     }
 
     /// Deleting a repeating template also trashes its open occurrences (they would otherwise be left behind).

@@ -74,6 +74,18 @@ enum ThingsChanges {
         return ["st": .number(when.day > today ? 2 : 1), "sb": 0, "sr": .number(ts), "tir": .number(ts), "ato": ato]
     }
 
+    /// Scheduling keys for an UPDATE of an existing to-do: only what the new "When" changes.
+    /// - Same day, another time: `ato` alone. The start state is untouched, so a to-do stays in This Evening.
+    /// - Another day, or no day: `st`, `sr`, `tir`, `ato`; and `sb 0` only when the to-do is in This Evening now
+    ///   (This Evening belongs to today's date, so it ends when the day changes). `sb` is never written otherwise.
+    static func schedulingUpdate(_ when: DueDate?, today: String, current: ThingsTask) throws -> [String: JSONValue] {
+        var keys = try scheduling(when, today: today)
+        keys["sb"] = nil
+        if when?.day == current.startDate { return ["ato": keys["ato"] ?? .null] }
+        if current.evening { keys["sb"] = 0 }
+        return keys
+    }
+
     static let inboxScheduling: [String: JSONValue] = ["st": 0, "sb": 0, "sr": nil, "tir": nil, "ato": nil]
 
     /// Container keys for a placement. A to-do in a project carries no area.

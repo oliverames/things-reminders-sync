@@ -333,7 +333,12 @@ struct EngineRepeatTests {
         #expect(await w.things.task("PLAIN")?.status == .completed)
         let current = try #require(w.links.links.first)
         #expect(current.thingsId != "PLAIN")
-        #expect(await w.things.task(current.thingsId)?.startDate == "2026-11-16")
+        // Things can hold this rule, so the replacement is a repeating to-do and the pair is a template pair from here on.
+        let fresh = try #require(await w.things.task(current.thingsId))
+        #expect(fresh.isTemplate && fresh.recurrence == rule && fresh.nextDay == "2026-11-16")
+        #expect(current.repeatMode == .template && current.fingerprint.rule == rule && !current.awaitingReplacement)
+        await w.things.clearRecords()
+        #expect(try await w.sync().changeCount == 0)
     }
 
     // MARK: Lifecycle

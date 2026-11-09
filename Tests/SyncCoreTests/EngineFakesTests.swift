@@ -24,7 +24,17 @@ actor FakeThings: ThingsBackend {
         ThingsRefreshResult(snapshot: ThingsSnapshot(tasks: tasks, areas: areas, tags: tags), changedTaskIds: [], fullReload: false)
     }
 
+    struct Failure: Error {}
+    /// The next `createTodo` throws. With `lands` the to-do exists anyway (the commit landed, the answer was lost).
+    private var failCreate: (lands: Bool, Void)?
+    func failNextCreate(lands: Bool) { failCreate = (lands, ()) }
+
     func createTodo(_ d: ThingsTodoDraft) async throws -> String {
+        if let failure = failCreate {
+            failCreate = nil
+            if failure.lands { _ = try await createTodo(d) }
+            throw Failure()
+        }
         created.append(d)
         let id = nextId("T")
         var t = ThingsTask(id: id, title: d.title, notes: d.notes, tagIds: d.tagIds, modificationDate: Date())
@@ -88,11 +98,14 @@ actor FakeThings: ThingsBackend {
         }
         if let rule = p.recurrence { t.recurrence = rule }
         if let next = p.templateNext { t.nextDay = next.day; t.instanceDay = next.day; t.reminderSeconds = next.reminderSeconds }
+        if let minutes = p.templateMinutes { t.reminderSeconds = minutes.map { $0 * 60 } }
         t.modificationDate = Date()
         tasks[id] = t
     }
 
+    private(set) var projectsCreated = 0
     func createProject(title: String, areaId: String?) async throws -> String {
+        projectsCreated += 1
         let id = nextId("P")
         tasks[id] = ThingsTask(id: id, kind: .project, title: title, areaId: areaId)
         return id
@@ -164,8 +177,19 @@ actor FakeReminders: RemindersBackend {
 
     func access() async -> RemindersAccess { .granted }
     func requestAccess() async throws -> RemindersAccess { .granted }
+    struct Failure: Error {}
+    /// Reads throw (RemCTL not answering).
+    var failReads = false
+    func setFailReads(_ v: Bool) { failReads = v }
+    /// The next `create` makes the reminder and then throws (the write landed, a later step failed).
+    var createLandsThenFails = false
+    func setCreateLandsThenFails(_ v: Bool) { createLandsThenFails = v }
+
     func lists() async throws -> [ReminderList] { listsById.values.sorted { $0.id < $1.id } }
-    func reminders(inLists ids: [String]) async throws -> [ReminderItem] { items.values.filter { ids.contains($0.listId) } }
+    func reminders(inLists ids: [String]) async throws -> [ReminderItem] {
+        if failReads { throw Failure() }
+        return items.values.filter { ids.contains($0.listId) }
+    }
 
     func create(title: String, notes: String, due: DueDate?, completed: Bool, completionDate: Date?, listId: String,
                 section: String?, recurrence: RepeatRule?) async throws -> ReminderItem {
@@ -177,6 +201,7 @@ actor FakeReminders: RemindersBackend {
                              isRepeating: recurrence != nil, section: groceryLists.contains(listId) ? nil : section, recurrence: recurrence)
         if let recurrence { created.append((title, due, recurrence)) }
         items[r.id] = r
+        if createLandsThenFails { createLandsThenFails = false; throw Failure() }
         return r
     }
 

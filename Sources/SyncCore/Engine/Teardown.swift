@@ -136,6 +136,9 @@ extension SyncEngine {
 
         if removeCopies {
             let copies = Teardown.copies(of: store.links.filter { $0.mappingId == listId }, snapshot: snapshot, reminders: items)
+            // To-dos this run moves to the Trash. They no longer keep the list's own area or tag alive (anything else
+            // in the Trash does, because areas and tags are deleted for good).
+            var trashedNow = Set<String>()
             for link in copies.things {
                 let title = snapshot.tasks[link.thingsId]?.title ?? link.fingerprint.title
                 do {
@@ -143,10 +146,12 @@ extension SyncEngine {
                         for o in snapshot.tasks.values.sorted(by: { $0.id < $1.id }) where o.templateId == link.thingsId && !o.trashed && o.status == .open {
                             try await things.updateTodo(id: o.id, patch: ThingsTodoPatch(trashed: true))
                             snapshot.tasks[o.id]?.trashed = true
+                            trashedNow.insert(o.id)
                         }
                     }
                     try await things.updateTodo(id: link.thingsId, patch: ThingsTodoPatch(trashed: true))
                     snapshot.tasks[link.thingsId]?.trashed = true
+                    trashedNow.insert(link.thingsId)
                     report.thingsTrashed += 1
                     log(.change, "Moved Things to-do \"\(title)\" to the Trash (stopped syncing \"\(mapping.listTitle)\")")
                 } catch { fail("Could not trash Things to-do \"\(title)\": \(error.localizedDescription)") }
@@ -163,7 +168,7 @@ extension SyncEngine {
             if copies.kept > 0 { log(.info, "Kept \(copies.kept) item\(copies.kept == 1 ? "" : "s") in \"\(mapping.listTitle)\" that existed on both sides before syncing") }
 
             // Containers and sections this app made for the list, if they are empty now.
-            for c in Teardown.emptyContainers(listId: listId, store: store, config: config, snapshot: snapshot, goneThings: []) {
+            for c in Teardown.emptyContainers(listId: listId, store: store, config: config, snapshot: snapshot, goneThings: trashedNow) {
                 let name = snapshot.displayTitle(c.kind, id: c.id) ?? c.title
                 do {
                     try await things.removeContainer(c)

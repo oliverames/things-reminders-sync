@@ -151,4 +151,37 @@ enum ThingsChangeValidator {
         }
         if !problems.isEmpty { throw ThingsCloudError.invalidChange(problems) }
     }
+
+    /// References that do not point at a live item of the right kind in `db`: `pr` must be a project, `agr` a
+    /// heading, `ts` a to-do (none of them trashed), `ar` an area and `tg` tags. An item the same change map creates
+    /// counts as live; one it deletes does not. The id check above only proves an id is well formed, not that it exists.
+    static func referenceProblems(in map: ThingsChangeMap, database db: ThingsDatabase) -> [String] {
+        func taskKind(_ ref: String) -> ThingsTaskKind? {
+            if let made = map[ref], made.t == 0, made.e.hasPrefix("Task") {
+                return made.p["tp"]?.int.flatMap(ThingsTaskKind.init(rawValue:)) ?? .todo
+            }
+            guard let row = db.tasks[ref], !row.task.trashed else { return nil }
+            return row.task.kind
+        }
+        func created(_ ref: String, _ entity: String) -> Bool { map[ref].map { $0.t == 0 && $0.e.hasPrefix(entity) } ?? false }
+        var problems: [String] = []
+        for (id, change) in map.sorted(by: { $0.key < $1.key }) where change.t != 2 {
+            for (key, what) in [("pr", "project"), ("agr", "heading"), ("ar", "area"), ("tg", "tag"), ("ts", "to-do")] {
+                for ref in (change.p[key]?.array ?? []).compactMap(\.string) {
+                    let live: Bool
+                    if map[ref]?.t == 2 { live = false } else {
+                        switch key {
+                        case "pr": live = taskKind(ref) == .project
+                        case "agr": live = taskKind(ref) == .heading
+                        case "ts": live = taskKind(ref) == .todo
+                        case "ar": live = db.areas[ref] != nil || created(ref, "Area")
+                        default: live = db.tags[ref] != nil || created(ref, "Tag")
+                        }
+                    }
+                    if !live { problems.append("\(id): \(key) refers to \(what) \(ref), which does not exist or is in the Trash") }
+                }
+            }
+        }
+        return problems
+    }
 }

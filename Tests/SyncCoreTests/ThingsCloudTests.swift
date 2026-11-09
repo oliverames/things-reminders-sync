@@ -152,8 +152,9 @@ struct ThingsCloudClientTests {
     }
 
     @Test func createTodoPayloadShape() async throws {
-        let cloud = FakeThingsCloud(head: 10)
-        let id = try await cloud.client().createTodo(ThingsTodoDraft(title: "Buy milk", notes: "2%", tagIds: [ThingsID.generate()]))
+        let tag = ThingsID.generate()
+        let cloud = FakeThingsCloud(items: [tagItem(tag)], head: 10)
+        let id = try await cloud.client().createTodo(ThingsTodoDraft(title: "Buy milk", notes: "2%", tagIds: [tag]))
         #expect(ThingsID.isValid(id))
         let commit = try #require(cloud.commits.first)
         #expect(commit.method == "POST")
@@ -190,7 +191,8 @@ struct ThingsCloudClientTests {
     @Test func schedulingTodayFutureNoneAndReminder() async throws {
         // now = 2026-11-09 01:00 UTC; in New York it is still 2026-11-08, so 11-09 is a future day there.
         let ny = TimeZone(identifier: "America/New_York")!
-        let cloud = FakeThingsCloud()
+        let project = ThingsID.generate(), area = ThingsID.generate()
+        let cloud = FakeThingsCloud(items: [projectItem(project), areaItem(area)])
         let client = cloud.client(timeZone: ny)
         func created(_ draft: ThingsTodoDraft) async throws -> [String: JSONValue] {
             let id = try await client.createTodo(draft)
@@ -207,13 +209,13 @@ struct ThingsCloudClientTests {
         #expect(tomorrow["st"] == 2)
         #expect(tomorrow["sr"] == .number(day(2026, 11, 9)))
         #expect(tomorrow["ato"] == .number(34_200))
-        let none = try await created(ThingsTodoDraft(title: "t", placement: .project(ThingsID.generate())))
+        let none = try await created(ThingsTodoDraft(title: "t", placement: .project(project)))
         #expect(none["st"] == 1)
         #expect(none["sr"] == .null)
         #expect(none["tir"] == .null)
         #expect(none["pr"]?.array?.count == 1)
         #expect(none["ar"] == [])
-        let inArea = try await created(ThingsTodoDraft(title: "t", placement: .area(ThingsID.generate())))
+        let inArea = try await created(ThingsTodoDraft(title: "t", placement: .area(area)))
         #expect(inArea["ar"]?.array?.count == 1)
         #expect(inArea["pr"] == [])
         let done = try await created(ThingsTodoDraft(title: "t", completed: true, completionDate: Date(timeIntervalSince1970: 1_700_000_000.5)))
@@ -223,8 +225,10 @@ struct ThingsCloudClientTests {
 
     @Test func updatePayloadsContainOnlyChangedKeys() async throws {
         let tagA = ThingsID.generate(), tagB = ThingsID.generate(), tagC = ThingsID.generate()
-        let task = ThingsID.generate()
-        let cloud = FakeThingsCloud(items: [taskItem(task, ["tt": "old", "tp": 0, "ss": 0, "st": 0, "tg": .array([.string(tagA), .string(tagB)])])])
+        let task = ThingsID.generate(), project = ThingsID.generate()
+        let cloud = FakeThingsCloud(items: [
+            taskItem(task, ["tt": "old", "tp": 0, "ss": 0, "st": 1, "sr": .number(day(2026, 11, 9)), "tg": .array([.string(tagA), .string(tagB)])]),
+            tagItem(tagA), tagItem(tagB), tagItem(tagC), projectItem(project)])
         let client = cloud.client()
         func patch(_ p: ThingsTodoPatch) async throws -> [String: JSONValue] {
             try await client.updateTodo(id: task, patch: p)
@@ -235,7 +239,8 @@ struct ThingsCloudClientTests {
         #expect(try cloud.commitBody()[task]?["t"] == 1)
 
         let anytime = try await patch(ThingsTodoPatch(when: .some(nil)))
-        #expect(anytime["st"] == 1 && anytime["sb"] == 0 && anytime["sr"] == .null && anytime["tir"] == .null && anytime["ato"] == .null)
+        #expect(anytime["st"] == 1 && anytime["sr"] == .null && anytime["tir"] == .null && anytime["ato"] == .null)
+        #expect(anytime["sb"] == nil)   // not in This Evening, so the evening flag is not written
 
         let reopen = try await patch(ThingsTodoPatch(completed: false))
         #expect(reopen["ss"] == 0 && reopen["sp"] == .null)
@@ -243,9 +248,9 @@ struct ThingsCloudClientTests {
         let tags = try await patch(ThingsTodoPatch(addTagIds: [tagC, tagA], removeTagIds: [tagB]))
         #expect(tags["tg"] == .array([.string(tagA), .string(tagC)]))
 
-        let project = ThingsID.generate()
         let move = try await patch(ThingsTodoPatch(placement: .project(project)))
         #expect(move["pr"] == .array([.string(project)]) && move["ar"] == [] && move["agr"] == [])
+        #expect(move["st"] == nil)   // already Anytime: the start state is left alone
 
         let trash = try await patch(ThingsTodoPatch(trashed: true))
         #expect(trash["tr"] == true)

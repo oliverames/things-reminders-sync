@@ -52,6 +52,17 @@ actor FakeRemCTL: RemCTLTransport {
     }
 
     func put(_ row: JSONValue) { rows[row["id"]!.int!] = row }
+    /// The list id of rows whose list title is shared by several lists (a real row only carries the title).
+    private var rowLists: [Int: Int] = [:]
+    func put(_ row: JSONValue, listId: Int) { put(row); rowLists[row["id"]!.int!] = listId }
+    private func listId(ofRow id: Int) -> Int? {
+        rowLists[id] ?? lists.first { $0["title"]?.string == rows[id]?["list"]?.string }?["id"]?.int
+    }
+    /// Scripted lost answers: the next call of the tool throws `.uncertain`, after doing the write when `lands`.
+    private var uncertain: [String: Bool] = [:]
+    func loseAnswer(of tool: String, lands: Bool) { uncertain[tool] = lands }
+    var failGetReminder = false
+    func setFailGetReminder(_ v: Bool) { failGetReminder = v }
     func setLists(_ l: [JSONValue]) { lists = l }
     func removeRow(_ id: Int) { rows[id] = nil }
     func setFailLists(_ e: RemCTLError?) { failLists = e }
@@ -63,6 +74,14 @@ actor FakeRemCTL: RemCTLTransport {
 
     func callTool(_ name: String, arguments: [String: JSONValue]) async throws -> JSONValue {
         calls.append((name, arguments))
+        if let lands = uncertain.removeValue(forKey: name) {
+            if lands { _ = try await perform(name, arguments) }
+            throw RemCTLError.uncertain("RemCTL did not confirm \(name)")
+        }
+        return try await perform(name, arguments)
+    }
+
+    private func perform(_ name: String, _ arguments: [String: JSONValue]) async throws -> JSONValue {
         switch name {
         case "lists":
             if let failLists { throw failLists }
@@ -91,7 +110,10 @@ actor FakeRemCTL: RemCTLTransport {
                     put(Self.row(nextId, title, list: rows[id]?["list"]?.string ?? "Work", ["isSubtask": true, "parentID": .number(Double(id))]))
                 }
             }
-            if let l = arguments["list_id"]?.int, let title = lists.first(where: { $0["id"]?.int == l })?["title"] { edit(id, "list", title) }
+            if let l = arguments["list_id"]?.int, let title = lists.first(where: { $0["id"]?.int == l })?["title"] {
+                edit(id, "list", title)
+                if rowLists[id] != nil { rowLists[id] = l }
+            }
             applySection(id, arguments, list: nil)
             return ["status": "updated", "id": .number(Double(id))]
         case "set_completion":
@@ -103,6 +125,7 @@ actor FakeRemCTL: RemCTLTransport {
             let sections = (listSections[id] ?? []).map { JSONValue.object(["id": .string("S-\($0)"), "name": .string($0)]) }
             return ["id": .number(Double(id)), "sections": .array(sections)]
         case "get_reminder":
+            if failGetReminder { throw RemCTLError.tool("get_reminder failed") }
             if staleReads > 0, let old = beforeUpdate[arguments["reminder_id"]?.int ?? 0] { staleReads -= 1; return old }
             guard let row = rows[arguments["reminder_id"]?.int ?? 0] else { throw RemCTLError.tool("Error: #\(arguments["reminder_id"]?.int ?? 0) not found") }
             return row
@@ -121,8 +144,8 @@ actor FakeRemCTL: RemCTLTransport {
             // ["show", "--list-id", id, "--completed", "--json"]: rows of one list, with their sections.
             if failShow { throw RemCTLError.tool("show failed") }
             guard arguments.count == 5, let id = Int(arguments[2]),
-                  let title = lists.first(where: { $0["id"]?.int == id })?["title"]?.string else { throw RemCTLError.tool("unexpected cli \(arguments)") }
-            return .array(rows.keys.sorted().compactMap { rows[$0] }.filter { $0["list"]?.string == title })
+                  lists.contains(where: { $0["id"]?.int == id }) else { throw RemCTLError.tool("unexpected cli \(arguments)") }
+            return .array(rows.keys.sorted().filter { listId(ofRow: $0) == id }.compactMap { rows[$0] })
         }
         if arguments.first == "section-delete" {
             // ["section-delete", NAME, "--list-id", id, "--force", "--private", "--json"]
@@ -143,15 +166,25 @@ actor FakeRemCTL: RemCTLTransport {
             }
             return .object(byList.mapValues { .array($0) })
         }
-        guard arguments == ["export", "--json"] else { throw RemCTLError.tool("unexpected cli \(arguments)") }
-        exportCount += 1
+        // ["export", "--list-id", id, "--json"]: the rows of one list, which is how a shared list title is told apart.
+        var only: Int?
+        if arguments.count == 4, arguments[0] == "export", arguments[1] == "--list-id", arguments[3] == "--json", let id = Int(arguments[2]) {
+            if failListExport { throw RemCTLError.tool("export failed") }
+            only = id
+        } else {
+            guard arguments == ["export", "--json"] else { throw RemCTLError.tool("unexpected cli \(arguments)") }
+            exportCount += 1
+        }
         // Like the real export, rows carry no `section`.
-        return .array(rows.keys.sorted().map { key in
+        return .array(rows.keys.sorted().filter { only == nil || listId(ofRow: $0) == only }.map { key in
             guard case .object(var o) = rows[key]! else { return rows[key]! }
             o["section"] = nil
             return .object(o)
         })
     }
+
+    var failListExport = false
+    func setFailListExport(_ v: Bool) { failListExport = v }
 
     func serverVersion() async -> String? { "2.5.0" }
     func setExecutablePath(_ path: String?) async {}
@@ -207,14 +240,60 @@ func makeBackend(_ fake: FakeRemCTL, dir: URL = tempDir(), clock: Clock = Clock(
         #expect(lists == [ReminderList(id: "1", title: "Work", colorHex: "#FF9500", allowsModifications: true)])
     }
 
-    @Test func ambiguousTitlesAreSkipped() async throws {
+    /// H2: a second list with the same title used to make every reminder of both lists vanish from the read, which
+    /// the engine then took for deletions. Rows are placed by list id instead.
+    @Test func listsSharingATitleAreReadByListId() async throws {
         let fake = FakeRemCTL()
         await fake.setLists([FakeRemCTL.list(1, "Same"), FakeRemCTL.list(2, "Same"), FakeRemCTL.list(3, "Solo")])
-        await fake.put(FakeRemCTL.row(1, "Guess", list: "Same"))
+        await fake.put(FakeRemCTL.row(1, "Mine", list: "Same"), listId: 1)
+        await fake.put(FakeRemCTL.row(4, "Theirs", list: "Same"), listId: 2)
         await fake.put(FakeRemCTL.row(2, "Fine", list: "Solo"))
-        let items = try await makeBackend(fake).reminders(inLists: ["1", "2", "3"])
-        #expect(items.map(\.title) == ["Fine"])
-        #expect(items[0].listId == "3")
+        let backend = makeBackend(fake)
+        let items = try await backend.reminders(inLists: ["1", "2", "3"]).sorted { $0.id < $1.id }
+        #expect(items.map(\.title) == ["Mine", "Fine", "Theirs"])
+        #expect(items.map(\.listId) == ["1", "3", "2"])
+        #expect(try await backend.reminders(inLists: ["1"]).map(\.title) == ["Mine"])
+        // A write on a reminder in such a list still knows its list afterwards.
+        let renamed = try await backend.update(id: "1", patch: ReminderPatch(title: "Mine too"))
+        #expect(renamed.listId == "1" && renamed.title == "Mine too")
+    }
+
+    /// H2: when the rows of a shared title cannot be placed, the read fails. It never returns the list as empty.
+    @Test func aSharedTitleThatCannotBeResolvedFailsTheRead() async throws {
+        let fake = FakeRemCTL()
+        await fake.setLists([FakeRemCTL.list(1, "Same"), FakeRemCTL.list(2, "Same")])
+        await fake.put(FakeRemCTL.row(1, "Mine", list: "Same"), listId: 1)
+        await fake.setFailListExport(true)
+        let backend = makeBackend(fake)
+        await #expect(throws: RemCTLError.self) { try await backend.reminders(inLists: ["1"]) }
+    }
+
+    /// M3: an all-day due with an alert that day shows as "Nov 12, 9:00 AM" in Reminders (RemCTL `displayDate`).
+    @Test func displayDateOnTheDueDayIsReadAsTheTime() async throws {
+        let fake = FakeRemCTL()
+        await fake.put(FakeRemCTL.row(1, "Alert that day", ["dueDate": "2026-11-12T00:00:00", "allDay": true, "displayDate": "2026-11-12T09:00:00"]))
+        await fake.put(FakeRemCTL.row(2, "Alert the day before", ["dueDate": "2026-11-12T00:00:00", "allDay": true, "displayDate": "2026-11-11T18:00:00"]))
+        await fake.put(FakeRemCTL.row(3, "Timed", ["dueDate": "2026-11-12T10:00:00", "allDay": false, "displayDate": "2026-11-12T09:45:00"]))
+        let items = try await makeBackend(fake).reminders(inLists: ["1"]).sorted { $0.id < $1.id }
+        #expect(items[0].due == DueDate(day: "2026-11-12", minutes: 9 * 60))
+        #expect(items[1].due == DueDate(day: "2026-11-12"))
+        #expect(items[2].due == DueDate(day: "2026-11-12", minutes: 10 * 60))
+    }
+
+    /// M7: reading one list must not re-stamp the sectioned reminders of another section-mirroring list.
+    @Test func readingOneListLeavesOtherSectionedListsStampsAlone() async throws {
+        let fake = FakeRemCTL()
+        await fake.put(FakeRemCTL.row(1, "In A", list: "Work", ["section": "Alpha"]))
+        await fake.put(FakeRemCTL.row(2, "In B", list: "Home", ["section": "Beta"]))
+        let clock = Clock()
+        let backend = makeBackend(fake, clock: clock)
+        await backend.setSectionLists(["1", "2"])
+        let first = try await backend.reminders(inLists: ["1", "2"]).first { $0.id == "2" }
+        clock.advance(500)
+        _ = try await backend.reminders(inLists: ["1"])   // a verification re-read of list 1 only
+        clock.advance(500)
+        let again = try await backend.reminders(inLists: ["1", "2"]).first { $0.id == "2" }
+        #expect(first?.lastModified != nil && again?.lastModified == first?.lastModified)
     }
 
     @Test func accessReportsVersionOrError() async throws {
@@ -299,7 +378,78 @@ func makeBackend(_ fake: FakeRemCTL, dir: URL = tempDir(), clock: Clock = Clock(
         await fake.put(FakeRemCTL.row(5, "X"))
         _ = try await makeBackend(fake).update(id: "5", patch: ReminderPatch(due: .some(nil)))
         let args = try #require(await fake.calls("update_reminder").first)
-        #expect(args["due"] == "clear" && args["alarm"] == "clear")
+        #expect(args["due"] == "clear" && args["alarm"] == nil)   // RemCTL clears an alarm at the old due time itself
+    }
+
+    /// M4: a due write never names the alarms of a reminder that has some, so a custom alert survives it.
+    @Test func dueWritesLeaveExistingAlarmsAlone() async throws {
+        let fake = FakeRemCTL()
+        await fake.put(FakeRemCTL.row(5, "X", ["dueDate": "2026-11-13T00:00:00", "allDay": true,
+                                               "alarms": [["id": 1, "type": "absolute", "date": "2026-11-12T18:00:00"]]]))
+        let backend = makeBackend(fake)
+        _ = try await backend.update(id: "5", patch: ReminderPatch(due: .some(DueDate(day: "2026-11-14"))))
+        _ = try await backend.update(id: "5", patch: ReminderPatch(due: .some(DueDate(day: "2026-11-14", minutes: 600))))
+        _ = try await backend.update(id: "5", patch: ReminderPatch(due: .some(nil)))
+        let calls = await fake.calls("update_reminder")
+        #expect(calls.map { $0["due"] } == ["2026-11-14", "2026-11-14 10:00", "clear"])
+        #expect(calls.allSatisfy { $0["alarm"] == nil })
+    }
+
+    /// H4: once `create_reminder` returned an id, a failing follow-up step must still hand the reminder back.
+    @Test func aCreateWhoseReadBackFailsStillReturnsTheReminder() async throws {
+        let fake = FakeRemCTL()
+        let backend = makeBackend(fake)
+        await fake.setFailGetReminder(true)
+        let item = try await backend.create(title: "Call plumber", notes: "n", due: DueDate(day: "2026-11-10"), completed: false,
+                                            completionDate: nil, listId: "2", section: nil)
+        #expect(item.id == "101" && item.listId == "2" && item.title == "Call plumber" && item.due == DueDate(day: "2026-11-10"))
+        #expect(await fake.calls("create_reminder").count == 1)
+    }
+
+    /// H3: a create whose answer is lost is looked up, not sent again.
+    @Test func aCreateWithALostAnswerIsFoundNotRepeated() async throws {
+        let fake = FakeRemCTL()
+        await fake.put(FakeRemCTL.row(7, "Call plumber", list: "Home"))   // an older reminder with the same title
+        let backend = makeBackend(fake)
+        _ = try await backend.reminders(inLists: ["1", "2"])
+        await fake.loseAnswer(of: "create_reminder", lands: true)
+        let item = try await backend.create(title: "Call plumber", notes: "", due: nil, completed: false, completionDate: nil, listId: "2", section: nil)
+        #expect(item.id == "101")
+        #expect(await fake.calls("create_reminder").count == 1)
+
+        await fake.loseAnswer(of: "create_reminder", lands: false)
+        await #expect(throws: RemCTLError.self) {
+            try await backend.create(title: "Other", notes: "", due: nil, completed: false, completionDate: nil, listId: "2", section: nil)
+        }
+        #expect(await fake.calls("create_reminder").count == 2)   // still not sent a second time
+    }
+
+    /// H3: an unconfirmed completion is checked by re-reading and never sent twice (a repeating reminder would skip an occurrence).
+    @Test func aCompletionWithALostAnswerIsCheckedNotRepeated() async throws {
+        let fake = FakeRemCTL()
+        await fake.put(FakeRemCTL.row(5, "X"))
+        let backend = makeBackend(fake)
+        await fake.loseAnswer(of: "set_completion", lands: true)
+        let done = try await backend.update(id: "5", patch: ReminderPatch(completed: true))
+        #expect(done.completed)
+        await fake.loseAnswer(of: "set_completion", lands: false)
+        await #expect(throws: RemCTLError.self) { try await backend.update(id: "5", patch: ReminderPatch(completed: false)) }
+        #expect(await fake.calls("set_completion").count == 2)
+    }
+
+    /// H3: an unconfirmed update is accepted when the re-read shows it, and is an error (retried next pass) when not.
+    @Test func anUpdateWithALostAnswerIsCheckedNotRepeated() async throws {
+        let fake = FakeRemCTL()
+        await fake.put(FakeRemCTL.row(5, "X"))
+        let backend = makeBackend(fake)
+        await fake.loseAnswer(of: "update_reminder", lands: true)
+        #expect(try await backend.update(id: "5", patch: ReminderPatch(title: "Y")).title == "Y")
+        await fake.loseAnswer(of: "update_reminder", lands: false)
+        await #expect(throws: RemCTLError.self) { try await backend.update(id: "5", patch: ReminderPatch(title: "Z")) }
+        // Subtasks would be added twice by a resend, so that write is never assumed either way.
+        await fake.loseAnswer(of: "update_reminder", lands: true)
+        await #expect(throws: RemCTLError.self) { try await backend.update(id: "5", patch: ReminderPatch(addSubtasks: ["a"])) }
+        #expect(await fake.calls("update_reminder").count == 3)
     }
 
     @Test func changingDueKeepsAlarmInStep() async throws {
@@ -310,7 +460,7 @@ func makeBackend(_ fake: FakeRemCTL, dir: URL = tempDir(), clock: Clock = Clock(
         _ = try await backend.update(id: "5", patch: ReminderPatch(due: .some(DueDate(day: "2026-11-12"))))
         let calls = await fake.calls("update_reminder")
         #expect(calls[0]["due"] == "2026-11-11 08:05" && calls[0]["alarm"] == "2026-11-11T08:05:00")
-        #expect(calls[1]["due"] == "2026-11-12" && calls[1]["alarm"] == "clear")
+        #expect(calls[1]["due"] == "2026-11-12" && calls[1]["alarm"] == nil)
     }
 
     @Test func moveToListAndRename() async throws {
@@ -475,6 +625,26 @@ final class LinkFactory: @unchecked Sendable {
         let failing = MCPTransport(timeout: .milliseconds(100)) { hopeless.next() }
         await #expect(throws: RemCTLError.self) { try await failing.callTool("lists", arguments: [:]) }
         #expect(hopeless.made == 2)
+    }
+
+    /// H3: a write that was sent and got no answer is not sent again; it surfaces as `.uncertain`.
+    @Test func aWriteThatGotNoAnswerIsNotSentAgain() async throws {
+        let silent = LinkFactory([.silentOnToolCall, .normal])
+        let transport = MCPTransport(timeout: .milliseconds(100)) { silent.next() }
+        do {
+            _ = try await transport.callTool("create_reminder", arguments: ["title": "x"])
+            Issue.record("the lost write must throw")
+        } catch let error as RemCTLError {
+            #expect(error.kind == .uncertain)
+        }
+        #expect(silent.made == 1)   // no second process was started to repeat the call
+
+        let dying = LinkFactory([.eofOnToolCall, .normal])
+        let second = MCPTransport { dying.next() }
+        await #expect(throws: RemCTLError.self) { try await second.callTool("set_completion", arguments: [:]) }
+        #expect(dying.made == 1)
+        // The session recovers for the next call.
+        #expect(try await second.callTool("lists", arguments: [:])["tool"] == "lists")
     }
 
     @Test func payloadUnwrapping() throws {

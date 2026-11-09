@@ -122,7 +122,16 @@ public struct ThingsTask: Codable, Hashable, Sendable, Identifiable {
 public struct ThingsArea: Codable, Hashable, Sendable, Identifiable {
     public var id: String
     public var title: String
-    public init(id: String, title: String) { self.id = id; self.title = title }
+    /// Tags the area itself carries (`tg`). Read so a tag an area still uses is never deleted.
+    public var tagIds: [String]
+    public init(id: String, title: String, tagIds: [String] = []) { self.id = id; self.title = title; self.tagIds = tagIds }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        tagIds = try c.decodeIfPresent([String].self, forKey: .tagIds) ?? []
+    }
 }
 
 public struct ThingsTag: Codable, Hashable, Sendable, Identifiable {
@@ -151,6 +160,8 @@ public struct ThingsTodoPatch: Codable, Hashable, Sendable {
     public var completed: Bool?
     /// Used with `completed == true`; defaults to now.
     public var completionDate: Date?
+    /// Moving an Inbox to-do into a project, area or heading also makes it Anytime (`st 1`). `.inbox` clears the
+    /// containers and writes `st 0` for an Anytime to-do without a start date; a dated or Someday to-do keeps its state.
     public var placement: ThingsPlacement?
     public var addTagIds: [String]?
     public var removeTagIds: [String]?
@@ -159,14 +170,20 @@ public struct ThingsTodoPatch: Codable, Hashable, Sendable {
     public var recurrence: RepeatRule?
     /// Templates only: moves the next occurrence (`tir`, `icsd`) and sets the reminder time (`ato`).
     public var templateNext: DueDate?
+    /// Templates only: sets the reminder time of future occurrences (`ato` alone); `.some(nil)` removes it.
+    public var templateMinutes: Int??
+    /// With `notes`: the Things notes this replacement was planned against. The write is refused (and retried on the
+    /// next pass) when the to-do's notes have changed in Things since, so a newer edit there is not overwritten.
+    public var notesBase: String?
     /// Checklist changes, written as `ChecklistItem3` entities in the same commit as the to-do.
     public var checklist: [ThingsChecklistChange]?
 
     public init(title: String? = nil, notes: String? = nil, when: DueDate?? = nil, completed: Bool? = nil,
                 completionDate: Date? = nil, placement: ThingsPlacement? = nil, addTagIds: [String]? = nil,
                 removeTagIds: [String]? = nil, trashed: Bool? = nil, recurrence: RepeatRule? = nil,
-                templateNext: DueDate? = nil, checklist: [ThingsChecklistChange]? = nil) {
-        self.checklist = checklist
+                templateNext: DueDate? = nil, checklist: [ThingsChecklistChange]? = nil,
+                templateMinutes: Int?? = nil, notesBase: String? = nil) {
+        self.checklist = checklist; self.templateMinutes = templateMinutes; self.notesBase = notesBase
         self.title = title; self.notes = notes; self.when = when; self.completed = completed
         self.completionDate = completionDate; self.placement = placement; self.addTagIds = addTagIds
         self.removeTagIds = removeTagIds; self.trashed = trashed; self.recurrence = recurrence
@@ -176,7 +193,7 @@ public struct ThingsTodoPatch: Codable, Hashable, Sendable {
     public var isEmpty: Bool {
         title == nil && notes == nil && when == nil && completed == nil && placement == nil
             && addTagIds == nil && removeTagIds == nil && trashed == nil && recurrence == nil && templateNext == nil
-            && (checklist?.isEmpty ?? true)
+            && templateMinutes == nil && (checklist?.isEmpty ?? true)
     }
 }
 
@@ -238,9 +255,11 @@ public protocol ThingsBackend: Sendable {
     func createHeading(title: String, projectId: String) async throws -> String
     func createArea(title: String) async throws -> String
     func createTag(title: String, parentId: String?) async throws -> String
-    /// Permanently deletes an area. Only used to remove an area this app created once it holds nothing.
+    /// Permanently deletes an area, first taking it off every task that still names it (trashed ones too), so no
+    /// reference is left dangling. Only used to remove an area this app created once it holds nothing.
     func deleteArea(id: String) async throws
-    /// Permanently deletes a tag. Only used to remove a tag this app created once nothing carries it.
+    /// Permanently deletes a tag, first taking it off every task that still carries it. Refused while an area
+    /// carries it or a tag nests under it. Only used to remove a tag this app created once nothing carries it.
     func deleteTag(id: String) async throws
 }
 

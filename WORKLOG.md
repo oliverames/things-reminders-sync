@@ -1,5 +1,30 @@
 # Worklog
 
+## 2026-11-09: audit fixes (uncommitted when written)
+
+Fixes for the code audit and the write-parity audit against the JavaScript connector. Tests: `swift test --parallel`.
+Each fix has a test in `Tests/SyncCoreTests/AuditFixTests.swift` or `RemCTLRemindersTests.swift`.
+
+- Duplicates: a "New…" target is created only after both sides were read (H1). A create that landed but was lost
+  is paired by title on the next pass, and `create` returns the reminder even when a follow-up step fails (H4).
+- Reminders reads: lists that share a title are read by list id; a read that cannot place its rows fails the pass (H2).
+  `displayDate` on the due day is read as the time (M3). Reading one list no longer re-stamps other sectioned lists (M7).
+- Reminders writes: a write with no answer is never resent; the reminder is re-read instead (H3). Due writes no longer
+  send `alarm: clear` (M4). Tags match without case (M10).
+- Things writes: `sb` is only written for a to-do in This Evening that changes day, and a same-day time change writes
+  `ato` alone (M5). References are checked against the database before a commit (M6). Tag and notes writes are built
+  from the current to-do, and a stale commit is rebuilt (M9). Leaving the Inbox writes `st 1`, entering it `st 0`;
+  area and tag tombstones strip references first, and the Trash counts as content for areas and tags (parity, L2).
+- Repeats: an item given a repeat after linking stays linked (M1). A failed replacement no longer advances the
+  reminder twice (M2). A new time reaches the template (M11).
+- Smaller: the deletion count limit covers the whole pass (L1), `mailto:` style links (L3), link prefix match (L4),
+  a log line when first-link notes are replaced (L5), checklist changes sync on the next poll (L6), README drift (L7).
+- Documented instead of changed: conflicts use one time per item, and the Reminders time is when the app saw the
+  change (M8). Declined: M12 (no failing input can be shown; RemCTL advances one occurrence per completion).
+- Not verified against the real apps: nothing here was run against Things Cloud or RemCTL. Open points: what
+  RemCTL's explicit `alarm` does to other alarms (so it is only sent for a reminder with none), and how Reminders
+  shows an all-day reminder with an alert once Things moves it to another day.
+
 ## 2026-11-09: v0.1.0, first public release
 
 - Tag `v0.1.0`; the asset is `ThingsRemindersSync-0.1.0.zip`, with SHA-256

@@ -10,6 +10,10 @@ public actor ThingsCloudClient: ThingsBackend {
     private var database: ThingsDatabase?
     private var busy = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    /// Task ids pulled by a refresh the client ran for its own writes, kept for the next `refresh()` so the caller
+    /// that polls for changes still hears about them.
+    private var carriedChanges = Set<String>()
+    private var carriedReload = false
 
     public init(email: String, password: String, timeZone: TimeZone = .current, session: URLSession = .shared) {
         self.init(email: email, password: password, timeZone: timeZone, now: { Date() },
@@ -61,7 +65,20 @@ public actor ThingsCloudClient: ThingsBackend {
     }
 
     public func refresh() async throws -> ThingsRefreshResult {
-        try await withLock { try await refreshLocked() }
+        try await withLock {
+            var result = try await refreshLocked()
+            result.changedTaskIds.formUnion(carriedChanges)
+            result.fullReload = result.fullReload || carriedReload
+            carriedChanges = []; carriedReload = false
+            return result
+        }
+    }
+
+    /// A refresh for the client's own use (before a write that depends on current data).
+    private func pull() async throws {
+        let result = try await refreshLocked()
+        carriedChanges.formUnion(result.changedTaskIds)
+        carriedReload = carriedReload || result.fullReload
     }
 
     private func refreshLocked() async throws -> ThingsRefreshResult {
@@ -98,9 +115,19 @@ public actor ThingsCloudClient: ThingsBackend {
 
     // MARK: Commit (every write goes through here, after validation)
 
-    private func commit(_ changes: ThingsChangeMap) async throws {
+    /// `retryStale: false` throws the 409/412 instead of sending the same body again, for a caller that rebuilds its
+    /// change from the refreshed database (an update whose content depends on the current task).
+    private func commit(_ changes: ThingsChangeMap, retryStale: Bool = true) async throws {
         guard !changes.isEmpty else { return }
         try ThingsChangeValidator.validate(changes)
+        // References must point at live items. A miss against the cached database is checked again after a pull,
+        // because the item may have been created elsewhere since.
+        if database == nil { try await pull() }
+        if !ThingsChangeValidator.referenceProblems(in: changes, database: database ?? ThingsDatabase()).isEmpty {
+            try await pull()
+            let problems = ThingsChangeValidator.referenceProblems(in: changes, database: database ?? ThingsDatabase())
+            if !problems.isEmpty { throw ThingsCloudError.invalidChange(problems) }
+        }
         let key = try await ensureHistoryKey()
         let body = JSONValue.object(changes.mapValues(\.json)).data()
         var ancestor: Int? = database?.latestServerIndex
@@ -125,7 +152,7 @@ public actor ThingsCloudClient: ThingsBackend {
                 return
             }
             // The index was stale (another client committed): fetch the real head and retry once.
-            if attempt < 1 {
+            if attempt < 1, retryStale {
                 ancestor = nil
                 continue
             }
@@ -215,65 +242,111 @@ public actor ThingsCloudClient: ThingsBackend {
 
     public func updateTodo(id: String, patch: ThingsTodoPatch) async throws {
         try await withLock {
-            if database == nil { _ = try await refreshLocked() }
-            if database?.tasks[id] == nil { _ = try await refreshLocked() } // created elsewhere since the last pull
-            guard let current = database?.tasks[id]?.task else { throw ThingsCloudError.notFound("to-do \(id)") }
-            guard !patch.isEmpty else { return }
-            let existingChecklist = (database?.checklistItems.values ?? [:].values).filter { $0.taskId == id }.map(\.item)
-
-            let nowDate = now()
-            let nowTs = nowDate.timeIntervalSince1970
-            var p: [String: JSONValue] = ["md": .number(nowTs)]
-            if let title = patch.title { p["tt"] = .string(title) }
-            if let notes = patch.notes { p["nt"] = ThingsChanges.noteObject(notes) }
-            if let when = patch.when {
-                p.merge(try ThingsChanges.scheduling(when, today: today())) { $1 }
+            if database == nil { try await pull() }
+            // Tags are written as the whole list and notes as the whole text, so both are built from the to-do as it
+            // is now, not as it was when the pass started: a tag or note edited in Things meanwhile must survive.
+            let needsCurrent = patch.addTagIds != nil || patch.removeTagIds != nil || patch.notes != nil
+            if needsCurrent || database?.tasks[id] == nil { try await pull() } // or created elsewhere since the last pull
+            guard !patch.isEmpty else {
+                guard database?.tasks[id] != nil else { throw ThingsCloudError.notFound("to-do \(id)") }
+                return
             }
-            if let completed = patch.completed {
-                if completed {
-                    var sp = nowTs
-                    if let date = patch.completionDate, date.timeIntervalSince1970 <= nowTs { sp = date.timeIntervalSince1970 }
-                    p["ss"] = 3
-                    p["sp"] = .number(sp)
-                } else {
-                    p["ss"] = 0
-                    p["sp"] = .null
-                }
+            do {
+                try await commit(try updateChanges(id: id, patch: patch), retryStale: false)
+            } catch ThingsCloudError.http(let status, _) where status == 409 || status == 412 {
+                // Another client committed in between: read what it wrote and build the change again from that.
+                try await pull()
+                try await commit(try updateChanges(id: id, patch: patch))
             }
-            if let placement = patch.placement { p.merge(ThingsChanges.containers(placement)) { $1 } }
-            if patch.addTagIds != nil || patch.removeTagIds != nil {
-                var tags = current.tagIds
-                for tag in patch.addTagIds ?? [] where !tags.contains(tag) { tags.append(tag) }
-                let remove = Set(patch.removeTagIds ?? [])
-                tags.removeAll { remove.contains($0) }
-                if tags != current.tagIds { p["tg"] = ThingsChanges.idArray(tags) }
-            }
-            if let trashed = patch.trashed { p["tr"] = .bool(trashed) }
-            if patch.recurrence != nil || patch.templateNext != nil {
-                guard let row = database?.tasks[id], row.hasRule else {
-                    throw ThingsCloudError.invalidChange(["to-do \(id) is not a repeating template"])
-                }
-                if let rule = patch.recurrence {
-                    let o = row.rawRule?.object
-                    var anchors: (ia: Double, sr: Double)?
-                    if o?["tp"]?.int == 0, let ia = o?["ia"]?.double, let sr = o?["sr"]?.double { anchors = (ia, sr) }
-                    let start = row.task.nextDay ?? current.startDate ?? today()
-                    guard let rr = ThingsRepeat.rr(for: rule, start: start, anchors: anchors) else {
-                        throw ThingsCloudError.invalidChange(["the repeat rule has no verified Things shape"])
-                    }
-                    p["rr"] = rr
-                }
-                if let next = patch.templateNext {
-                    let scheduling = try ThingsChanges.templateScheduling(next)
-                    p["tir"] = scheduling["tir"]; p["icsd"] = scheduling["icsd"]; p["ato"] = scheduling["ato"]
-                }
-            }
-            var map: ThingsChangeMap = [id: ThingsChange(t: 1, e: ThingsEntity.task, p: p)]
-            if let changes = patch.checklist, !changes.isEmpty {
-                map.merge(try checklistWrites(taskId: id, changes, existing: existingChecklist)) { $1 }
-            }
-            try await commit(map)
         }
+    }
+
+    /// The change map for a to-do update, built from the database as it is now. Carries only the keys the patch changes.
+    private func updateChanges(id: String, patch: ThingsTodoPatch) throws -> ThingsChangeMap {
+        guard let db = database, let row = db.tasks[id] else { throw ThingsCloudError.notFound("to-do \(id)") }
+        let current = row.task
+        let existingChecklist = db.checklistItems.values.filter { $0.taskId == id }.map(\.item)
+
+        let nowTs = now().timeIntervalSince1970
+        var p: [String: JSONValue] = ["md": .number(nowTs)]
+        if let title = patch.title { p["tt"] = .string(title) }
+        if let notes = patch.notes {
+            if let base = patch.notesBase, base != current.notes {
+                throw ThingsCloudError.changedMeanwhile("The notes of \"\(current.title)\"")
+            }
+            p["nt"] = ThingsChanges.noteObject(notes)
+        }
+        if let when = patch.when {
+            p.merge(try ThingsChanges.schedulingUpdate(when, today: today(), current: current)) { $1 }
+        }
+        if let completed = patch.completed {
+            if completed {
+                var sp = nowTs
+                if let date = patch.completionDate, date.timeIntervalSince1970 <= nowTs { sp = date.timeIntervalSince1970 }
+                p["ss"] = 3
+                p["sp"] = .number(sp)
+            } else {
+                p["ss"] = 0
+                p["sp"] = .null
+            }
+        }
+        if let placement = patch.placement {
+            p.merge(ThingsChanges.containers(placement)) { $1 }
+            // The start state follows the move unless this patch already sets it (as the JavaScript client does):
+            // an Inbox to-do filed into a project, area or heading becomes Anytime, and a to-do sent to the Inbox
+            // gets `st 0`. A dated to-do, a Someday to-do and a repeating template keep their state: the Inbox holds
+            // no dated items, and `st 0` would pull the others out of where the user put them.
+            if p["st"] == nil, current.kind == .todo {
+                if case .inbox = placement {
+                    if current.start == .anytime, current.startDate == nil, !row.hasRule, (patch.when ?? nil) == nil { p["st"] = 0 }
+                } else if current.start == .inbox {
+                    p["st"] = 1
+                }
+            }
+        }
+        if patch.addTagIds != nil || patch.removeTagIds != nil {
+            // Ids of tags that no longer exist are dropped rather than written back.
+            var tags = current.tagIds.filter { db.tags[$0] != nil }
+            for tag in patch.addTagIds ?? [] where !tags.contains(tag) { tags.append(tag) }
+            let remove = Set(patch.removeTagIds ?? [])
+            tags.removeAll { remove.contains($0) }
+            if tags != current.tagIds { p["tg"] = ThingsChanges.idArray(tags) }
+        }
+        if let trashed = patch.trashed { p["tr"] = .bool(trashed) }
+        if patch.recurrence != nil || patch.templateNext != nil || patch.templateMinutes != nil {
+            guard row.hasRule else {
+                throw ThingsCloudError.invalidChange(["to-do \(id) is not a repeating template"])
+            }
+            if let rule = patch.recurrence {
+                let o = row.rawRule?.object
+                var anchors: (ia: Double, sr: Double)?
+                if o?["tp"]?.int == 0, let ia = o?["ia"]?.double, let sr = o?["sr"]?.double { anchors = (ia, sr) }
+                let start = row.task.nextDay ?? current.startDate ?? today()
+                guard let rr = ThingsRepeat.rr(for: rule, start: start, anchors: anchors) else {
+                    throw ThingsCloudError.invalidChange(["the repeat rule has no verified Things shape"])
+                }
+                p["rr"] = rr
+            }
+            if let minutes = patch.templateMinutes {
+                if let minutes {
+                    guard (0..<1440).contains(minutes) else {
+                        throw ThingsCloudError.invalidChange(["reminder minutes \(minutes) is outside 0..<1440"])
+                    }
+                    p["ato"] = .number(Double(minutes * 60))
+                } else {
+                    p["ato"] = .null
+                }
+            }
+            if let next = patch.templateNext {
+                let scheduling = try ThingsChanges.templateScheduling(next)
+                p["tir"] = scheduling["tir"]; p["icsd"] = scheduling["icsd"]; p["ato"] = scheduling["ato"]
+            }
+        }
+        var map: ThingsChangeMap = [id: ThingsChange(t: 1, e: ThingsEntity.task, p: p)]
+        if let changes = patch.checklist, !changes.isEmpty {
+            map.merge(try checklistWrites(taskId: id, changes, existing: existingChecklist)) { $1 }
+        }
+        return map
     }
 
     public func createProject(title: String, areaId: String?) async throws -> String {
@@ -315,21 +388,39 @@ public actor ThingsCloudClient: ThingsBackend {
         }
     }
 
-    /// Permanently deletes an area (t 2). A missing area is already gone.
+    /// Permanently deletes an area (t 2). A missing area is already gone. Every task that still names the area
+    /// (trashed ones included) first gets `ar []` in the same commit, as the JavaScript client does, so a to-do
+    /// restored from the Trash later never points at an area that no longer exists.
     public func deleteArea(id: String) async throws {
         try await withLock {
-            if database == nil || database?.areas[id] == nil { _ = try await refreshLocked() }
-            guard database?.areas[id] != nil else { return }
-            try await commit([id: ThingsChange(t: 2, e: ThingsEntity.area, p: [:])])
+            try await pull()
+            guard let db = database, db.areas[id] != nil else { return }
+            let nowTs = now().timeIntervalSince1970
+            var map: ThingsChangeMap = [id: ThingsChange(t: 2, e: ThingsEntity.area, p: [:])]
+            for (taskId, row) in db.tasks where row.task.areaId == id {
+                map[taskId] = ThingsChange(t: 1, e: ThingsEntity.task, p: ["ar": [], "md": .number(nowTs)])
+            }
+            try await commit(map)
         }
     }
 
-    /// Permanently deletes a tag (t 2). A missing tag is already gone.
+    /// Permanently deletes a tag (t 2). A missing tag is already gone. Every task that still carries the tag (trashed
+    /// ones included) first gets its `tg` without it, in the same commit. Refused while an area carries the tag or
+    /// another tag nests under it: this client writes no area or tag update, and a tombstone would leave them dangling.
     public func deleteTag(id: String) async throws {
         try await withLock {
-            if database == nil || database?.tags[id] == nil { _ = try await refreshLocked() }
-            guard database?.tags[id] != nil else { return }
-            try await commit([id: ThingsChange(t: 2, e: ThingsEntity.tag, p: [:])])
+            try await pull()
+            guard let db = database, db.tags[id] != nil else { return }
+            if db.areas.values.contains(where: { $0.tagIds.contains(id) }) || db.tags.values.contains(where: { $0.parentId == id }) {
+                throw ThingsCloudError.invalidChange(["tag \(id) is still carried by an area or has tags nested under it"])
+            }
+            let nowTs = now().timeIntervalSince1970
+            var map: ThingsChangeMap = [id: ThingsChange(t: 2, e: ThingsEntity.tag, p: [:])]
+            for (taskId, row) in db.tasks where row.task.tagIds.contains(id) {
+                map[taskId] = ThingsChange(t: 1, e: ThingsEntity.task,
+                                           p: ["tg": ThingsChanges.idArray(row.task.tagIds.filter { $0 != id }), "md": .number(nowTs)])
+            }
+            try await commit(map)
         }
     }
 }

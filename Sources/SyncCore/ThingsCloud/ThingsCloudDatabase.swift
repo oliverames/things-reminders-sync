@@ -35,6 +35,7 @@ struct ThingsDatabase: Sendable {
         for (id, change) in map {
             if change.t == 2 {
                 if tasks.removeValue(forKey: id) != nil { touched.insert(id) }
+                if let parent = checklistItems[id]?.taskId { touched.insert(parent) }   // a removed checklist item changes its to-do
                 areas.removeValue(forKey: id)
                 tags.removeValue(forKey: id)
                 checklistItems.removeValue(forKey: id)
@@ -54,9 +55,12 @@ struct ThingsDatabase: Sendable {
                 if let v = p["ix"] { row.item.index = v.double ?? 0 }
                 if let v = p["ts"] { row.taskId = v.array?.first?.string }
                 checklistItems[id] = row
+                // A checklist change is a change of its to-do: without this a checked item waits for the full reconcile.
+                if let parent = row.taskId { touched.insert(parent) }
             } else if change.e.hasPrefix("Area") {
                 var area = change.t == 0 ? ThingsArea(id: id, title: "") : (areas[id] ?? ThingsArea(id: id, title: ""))
                 if let tt = p["tt"] { area.title = tt.string ?? "" }
+                if let tg = p["tg"] { area.tagIds = (tg.array ?? []).compactMap(\.string) }
                 areas[id] = area
             } else if change.e.hasPrefix("Tag") {
                 var tag = change.t == 0 ? ThingsTag(id: id, title: "") : (tags[id] ?? ThingsTag(id: id, title: ""))

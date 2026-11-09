@@ -79,35 +79,45 @@ You can change a list's mode or target later. The app moves the items it linked 
 | Reminders | Things | Notes |
 |---|---|---|
 | Title | Title | |
-| Notes (plain text) | Notes (Markdown) | Things keeps the Markdown. Reminders gets a readable plain version, and the Things notes change only when you edit them in Reminders. |
+| Notes (plain text) | Notes (Markdown) | Things keeps the Markdown, and Reminders gets a readable plain version. The Things notes change only when you edit the notes in Reminders, and that edit replaces them with the plain text, so the Markdown of that note is lost. |
 | Rich link | A link on the last line of the notes | Things shows it as a clickable link. |
 | Due date and time | When date and reminder time | |
 | Completed | Completed | Canceled in Things counts as completed in Reminders. |
 | Repeat rule | Repeat rule | Daily, weekly, monthly and yearly rules, including nth weekdays, the last day of the month, and end conditions. |
-| Flag | Your **Important** tag | The tag name is a setting. |
-| Tags | Tags with the same name | Only tags that already exist in Things, because the app never creates tags. |
+| Flag | Your **Important** tag | The tag name is `flaggedTagTitle` in `config.json`. Settings has no control for it yet. |
+| Tags | Tags with the same name | Only tags that already exist in Things, matched without regard to case. The app never creates a tag for this. The only tag it ever creates is the target of a tag-mode list you save as "New…". |
 | Subtasks | Checklist items | Things to Reminders is on. Reminders to Things stays off until every checklist write is verified against the Things app. |
 | Section | Heading | In project mode. |
 
-Fields that only one app has stay put and are never cleared. That covers priority, urgent, early reminders, location alarms, images and assignees in Reminders, and deadlines and This Evening in Things. Every update carries only the fields that changed.
+Fields that only one app has stay put and are never cleared. That covers priority, urgent, early reminders, location alarms, images and assignees in Reminders, and deadlines and This Evening in Things. Every update carries only the fields that changed. A due date change leaves a reminder's other alerts alone, and a new time on the same day leaves a to-do in This Evening. Moving a to-do to another day takes it out of This Evening, because This Evening belongs to today.
+
+A reminder that is due all day and has an alert on that day shows a time in Reminders, so it syncs as due at that time.
+
+A to-do you leave in Today keeps the day it was scheduled for, so the day after, Things still shows it under Today while Reminders shows the reminder as overdue. Both are the same date.
+
+When a list is first turned on and an item has different notes on each side, the Things notes win and the activity log names the item.
 
 ### Repeating items
 
 A repeating reminder pairs with a Things repeating to-do, and the rule syncs both ways. Complete it in either app and the other one moves on to the next date. Things creates the copies of a repeating to-do itself, so the app never makes them for it.
+
+You can add a repeat to an item that is already synced. Add it in Things and the reminder gets the same rule. Add it in Reminders and the Things to-do stands for the current occurrence; when you complete it, Things gets a repeating to-do for the rule. A new time for a repeating reminder is written to the Things repeating to-do as well, so later occurrences keep it.
 
 Some rules only one app can express. Reminders has no "repeat after completion," and RemCTL can't write every rule Reminders supports. When that happens, the app syncs the current occurrence as a plain item and logs why.
 
 ## How it stays safe
 
 - **Validated writes.** Every Things change is checked before it's sent. Ids have to decode to exactly 16 bytes, dates have to be real calendar days, references have to point at live items, and repeat rules have to match a shape on file in [docs/RECURRENCE.md](docs/RECURRENCE.md). A change that fails isn't sent.
-- **A deletion limit.** If one pass would delete more than 10 items or more than a quarter of a list's links, it holds those deletions and waits for you to choose **Sync Now** from the menu.
-- **Trash, never purge.** Deleted Things items go to the Trash, and the app never empties it.
+- **A deletion limit.** If one pass would delete more than 10 items in all, or more than a quarter of one list's links, it holds those deletions and waits for you to choose **Sync Now** from the menu. One deletion in a list is never held by the quarter rule.
+- **A failed read is never a deletion.** If the app can't read Reminders or Things, or can't tell which of two lists with the same name a reminder is in, the pass stops and nothing is changed. Two lists may share a name; the app tells them apart by id.
+- **No blind retries.** A write to Reminders that gets no answer is never sent again. The app reads the reminder back to see whether the write landed. An item whose partner already exists is linked by title instead of being copied a second time.
+- **Trash, never purge.** Deleted Things to-dos, projects and headings go to the Trash, and the app never empties it. The one exception is an area or tag the app created itself: Things has no Trash for those, so the app deletes one once nothing uses it, counting what is in the Trash as use.
 - **An ownership ledger.** The app records what it created, so when you change settings it removes only its own copies and never your items.
-- **Conflicts by field.** For each field, the later edit wins. RemCTL doesn't report modification times, so the app records when it first saw each change, which is accurate to the poll interval.
+- **Conflicts by field.** A field changed on only one side is copied to the other. When the same field changed on both sides, the item that was edited later wins. That time is per item, not per field: Things reports one modification time for a to-do, and RemCTL reports none, so for a reminder the app uses the moment it first saw the change. While the app is running that is accurate to the poll interval. After the Mac sleeps or the app restarts, a reminder edited in the meantime counts as edited when the app next looked, so it wins over a Things edit made during the same gap.
 
 ## Configuration
 
-Settings live in the app. These are the defaults:
+Settings live in the app, apart from the flag tag name. These are the defaults:
 
 | Setting | Default | Range | What it does |
 |---|---|---|---|
@@ -116,6 +126,8 @@ Settings live in the app. These are the defaults:
 | Full reconcile | 10 min | 5 to 120 min | A complete two-way pass that catches anything a poll missed |
 | Propagate deletes | On | | Deleting on one side deletes the partner |
 | Include completed on first link | Off | | Whether completed items come across when a list is first turned on |
+
+The ranges are what Settings offers. A `config.json` edited by hand is only held to a floor: 1 s for the Reminders poll, 5 s for the Things poll and 1 minute for the full reconcile.
 
 Your Things Cloud password is stored in the macOS Keychain.
 

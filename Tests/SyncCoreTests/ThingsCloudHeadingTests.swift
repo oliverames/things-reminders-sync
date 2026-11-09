@@ -4,8 +4,8 @@ import Testing
 
 @Suite("Things client headings") struct ThingsCloudHeadingTests {
     @Test func createHeadingPayloadShape() async throws {
-        let cloud = FakeThingsCloud(head: 3)
         let project = ThingsID.generate()
+        let cloud = FakeThingsCloud(items: [projectItem(project)], head: 3)
         let id = try await cloud.client().createHeading(title: "Groceries", projectId: project)
         #expect(ThingsID.isValid(id))
         let change = try #require(try cloud.commitBody()[id]?.object)
@@ -18,19 +18,18 @@ import Testing
     }
 
     @Test func headingPlacementKeysAndDecoding() async throws {
-        let cloud = FakeThingsCloud(head: 0)
-        let client = cloud.client()
         let heading = ThingsID.generate()
+        let project = ThingsID.generate()
+        let moved = ThingsID.generate()
+        let cloud = FakeThingsCloud(items: [taskItem(moved, ["tt": "x", "tp": 0, "pr": .array([.string(project)])]),
+                                            taskItem(heading, ["tt": "H", "tp": 2, "pr": .array([.string(project)])]),
+                                            projectItem(project)])
+        let client = cloud.client()
         let id = try await client.createTodo(ThingsTodoDraft(title: "In heading", placement: .heading(heading)))
         let p = try #require(try cloud.commitBody()[id]?["p"]?.object)
         #expect(p["agr"] == .array([.string(heading)]) && p["pr"] == [] && p["ar"] == [])
 
         // Moving an existing to-do into a heading clears project and area; decoding exposes headingId.
-        let project = ThingsID.generate()
-        let moved = ThingsID.generate()
-        cloud.items = [taskItem(moved, ["tt": "x", "tp": 0, "pr": .array([.string(project)])]),
-                       taskItem(heading, ["tt": "H", "tp": 2, "pr": .array([.string(project)])])]
-        cloud.head = 2
         try await client.updateTodo(id: moved, patch: ThingsTodoPatch(placement: .heading(heading)))
         let update = try #require(try cloud.commitBody(cloud.commits.count - 1)[moved]?["p"]?.object)
         #expect(update["agr"] == .array([.string(heading)]) && update["pr"] == [] && update["ar"] == [])

@@ -12,6 +12,8 @@ final class FakeThingsCloud: @unchecked Sendable {
     var pageCap: Int
     var head: Int
     var commitStatuses: [Int] = []
+    /// Runs when a commit is refused (409/412): what another client committed in between.
+    var onRefusedCommit: (() -> Void)?
 
     init(items: [JSONValue] = [], head: Int? = nil, pageCap: Int = .max) {
         self.items = items
@@ -40,7 +42,7 @@ final class FakeThingsCloud: @unchecked Sendable {
                 (value.data(), HTTPURLResponse(url: request.url!, statusCode: code, httpVersion: nil, headerFields: nil)!)
             }
             if url.contains("/commit") {
-                if status != 200 { return reply(["error": "stale"]) }
+                if status != 200 { onRefusedCommit?(); return reply(["error": "stale"]) }
                 return reply(["server-head-index": .number(Double(lock.withLock { head += 1; return head }))])
             }
             if url.contains("/items") {
@@ -62,6 +64,12 @@ final class FakeThingsCloud: @unchecked Sendable {
 func taskItem(_ id: String, _ p: [String: JSONValue] = [:], entity: String = "Task6", t: Int = 0) -> JSONValue {
     .object([id: .object(["t": .number(Double(t)), "e": .string(entity), "p": .object(p)])])
 }
+
+/// History items for the containers a write refers to (the client refuses references to items that do not exist).
+func projectItem(_ id: String, _ p: [String: JSONValue] = [:]) -> JSONValue { taskItem(id, ["tt": "Project", "tp": 1].merging(p) { $1 }) }
+func headingItem(_ id: String, project: String) -> JSONValue { taskItem(id, ["tt": "Heading", "tp": 2, "pr": .array([.string(project)])]) }
+func tagItem(_ id: String, _ title: String = "Tag") -> JSONValue { taskItem(id, ["tt": .string(title)], entity: "Tag4") }
+func areaItem(_ id: String, _ p: [String: JSONValue] = [:]) -> JSONValue { taskItem(id, ["tt": "Area"].merging(p) { $1 }, entity: "Area3") }
 
 func day(_ y: Int, _ m: Int, _ d: Int) -> Double {
     var cal = Calendar(identifier: .gregorian)

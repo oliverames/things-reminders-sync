@@ -15,7 +15,7 @@ enum NotesLink {
     /// How Reminders shows Things notes: the trailing link line becomes the rich link when the reminder has none (or
     /// the same one); a different link stays in the notes as text. Markdown is rendered as plain text.
     static func render(thingsNotes: String, existingURL: String?) -> (notes: String, url: String?) {
-        let (body, trail) = NoteFormatting.splitTrailingURL(thingsNotes)
+        let (body, trail) = NoteFormatting.splitTrailingURL(thingsNotes, known: existingURL)
         guard let trail else { return (NoteFormatting.plainText(fromMarkdown: thingsNotes), existingURL) }
         if existingURL == nil || existingURL == trail { return (NoteFormatting.plainText(fromMarkdown: body), trail) }
         return (NoteFormatting.plainText(fromMarkdown: thingsNotes), existingURL)
@@ -30,7 +30,7 @@ enum NotesLink {
     /// Things notes with the link line `old` swapped for `new` (added when `old` is not the trailing line).
     static func replacingTrailingURL(in notes: String, old: String?, new: String?) -> String {
         var base = notes
-        let (body, trail) = NoteFormatting.splitTrailingURL(notes)
+        let (body, trail) = NoteFormatting.splitTrailingURL(notes, known: old)
         if let trail, let old, trail == old { base = body }
         guard let new else { return base }
         return NoteFormatting.appendingURL(new, to: base)
@@ -78,8 +78,13 @@ struct ChecklistOutcome {
 /// Tags the engine may sync: titles that exist in Things, minus the flagged tag and every tag a tag-mode list owns.
 struct TagEnvironment {
     var flaggedId: String?
-    /// Mappable tag title -> Things tag id (the oldest id when several share a title).
-    var idByTitle: [String: String] = [:]
+    /// Mappable tag title, lowercased -> Things tag id (the oldest id when several share a title). Titles match
+    /// without case because Reminders treats `#errands` and `#Errands` as one tag.
+    var idByKey: [String: String] = [:]
+    /// The same key -> the title as Things spells it.
+    var titleByKey: [String: String] = [:]
+
+    static func key(_ title: String) -> String { title.lowercased() }
 }
 
 func checklistKey(_ title: String) -> String { Fingerprint.normalize(title).lowercased() }
@@ -95,8 +100,9 @@ extension SyncPass {
         var excluded: Set<String> = Set(config.mappings.filter { $0.mode == .tag }.compactMap(\.targetId))
         if let f = env.flaggedId { excluded.insert(f) }
         // RemCTL's `set_tags` takes one comma-separated string, so a title with a comma cannot be written to Reminders.
-        for tag in sorted where !excluded.contains(tag.id) && !tag.title.isEmpty && !tag.title.contains(",") && env.idByTitle[tag.title] == nil {
-            env.idByTitle[tag.title] = tag.id
+        for tag in sorted where !excluded.contains(tag.id) && !tag.title.isEmpty && !tag.title.contains(",") {
+            let key = TagEnvironment.key(tag.title)
+            if env.idByKey[key] == nil { env.idByKey[key] = tag.id; env.titleByKey[key] = tag.title }
         }
         tagEnv = env
         if isFull, env.flaggedId == nil {
@@ -104,8 +110,9 @@ extension SyncPass {
         }
     }
 
-    func thingsTagTitles(_ t: ThingsTask) -> Set<String> {
-        Set(t.tagIds.compactMap { snapshot.tags[$0]?.title }.filter { tagEnv.idByTitle[$0] != nil })
+    /// Keys of the to-do's tags that can sync.
+    func thingsTagKeys(_ t: ThingsTask) -> Set<String> {
+        Set(t.tagIds.compactMap { snapshot.tags[$0]?.title }.map(TagEnvironment.key).filter { tagEnv.idByKey[$0] != nil })
     }
 
     // MARK: Notes
@@ -137,14 +144,14 @@ extension SyncPass {
         let legacy = base.remindersNotes == nil
         let t0 = base.notes
         let n0 = base.remindersNotes ?? base.notes
-        let u0: String? = legacy ? (u.flatMap { t.notes.contains($0) ? $0 : nil }) : NotesLink.clean(base.url)
+        let u0: String? = legacy ? (u.flatMap { NoteFormatting.containsLink($0, in: t.notes) ? $0 : nil }) : NotesLink.clean(base.url)
         let tCh = tn != t0, textR = nn != n0, linkR = u != u0
 
         if !tCh && !textR && !linkR { return NotesOutcome(fpNotes: t0, fpRemindersNotes: n0, fpURL: u0) }
 
         // Both are renderings of the same text: accept without writing (no ping-pong, nothing synthesized over user text).
         let (rn, ru) = NotesLink.render(thingsNotes: t.notes, existingURL: u)
-        if Fingerprint.normalize(rn) == nn, ru == u, u == nil || t.notes.contains(u!) || u == u0 {
+        if Fingerprint.normalize(rn) == nn, ru == u, u == nil || NoteFormatting.containsLink(u!, in: t.notes) || u == u0 {
             return NotesOutcome(fpNotes: tn, fpRemindersNotes: nn, fpURL: u)
         }
 
@@ -189,20 +196,22 @@ extension SyncPass {
     // MARK: Tags
 
     func decideTags(base: Fingerprint?, reminder r: ReminderItem, task t: ThingsTask) -> TagOutcome {
-        let mappable = Set(tagEnv.idByTitle.keys)
-        let rset = Set(r.tags).intersection(mappable)
-        let tset = thingsTagTitles(t)
-        let b = Set(base?.tags ?? []).intersection(mappable)
+        // Everything compares by lowercased title: a reminder's `#errands` and the Things tag "Errands" are the same tag.
+        let key = TagEnvironment.key
+        let mappable = Set(tagEnv.idByKey.keys)
+        let rset = Set(r.tags.map(key)).intersection(mappable)
+        let tset = thingsTagKeys(t)
+        let b = Set((base?.tags ?? []).map(key)).intersection(mappable)
         let final = b.subtracting(b.subtracting(rset)).subtracting(b.subtracting(tset)).union(rset.subtracting(b)).union(tset.subtracting(b))
-        var out = TagOutcome(fp: final.sorted())
+        var out = TagOutcome(fp: final.compactMap { tagEnv.titleByKey[$0] }.sorted())
         // Things: carry the tags with those titles; removal covers every tag of the to-do with a removed title.
-        out.thingsAdd = final.subtracting(tset).sorted().compactMap { tagEnv.idByTitle[$0] }
-        let removeTitles = tset.subtracting(final)
-        out.thingsRemove = t.tagIds.filter { id in snapshot.tags[id].map { removeTitles.contains($0.title) } ?? false }
-        // Reminders: every tag without a Things counterpart is kept as it is.
-        let kept = r.tags.filter { !mappable.contains($0) || final.contains($0) }
-        let added = final.subtracting(rset).sorted()
-        if Set(kept + added) != Set(r.tags) { out.reminderTags = kept + added }
+        out.thingsAdd = final.subtracting(tset).sorted().compactMap { tagEnv.idByKey[$0] }
+        let removeKeys = tset.subtracting(final)
+        out.thingsRemove = t.tagIds.filter { id in snapshot.tags[id].map { removeKeys.contains(key($0.title)) } ?? false }
+        // Reminders: every tag without a Things counterpart is kept as it is, and a tag it already has keeps its spelling.
+        let kept = r.tags.filter { !mappable.contains(key($0)) || final.contains(key($0)) }
+        let added = final.subtracting(rset).sorted().compactMap { tagEnv.titleByKey[$0] }
+        if !added.isEmpty || kept.count != r.tags.count { out.reminderTags = kept + added }
         return out
     }
 
@@ -281,6 +290,7 @@ extension SyncPass {
         plan.reminderPatch.notes = n.reminderNotes
         plan.reminderPatch.url = n.reminderURL
         plan.thingsPatch.notes = n.thingsNotes
+        if n.thingsNotes != nil { plan.thingsPatch.notesBase = t.notes }   // refused if Things edits the notes meanwhile
         if n.conflict { plan.conflicts.append("notes") }
         plan.fingerprint.notes = n.fpNotes; plan.fingerprint.remindersNotes = n.fpRemindersNotes; plan.fingerprint.url = n.fpURL
 
@@ -331,10 +341,10 @@ extension SyncPass {
                 plan.fingerprint.flagged = base != nil ? base!.flagged : actual.flagged
                 log(.warning, "\"\(title)\": Reminders did not take the flag; it will be retried")
             }
-            if let wanted = plan.reminderPatch.tags, Set(actual.tags) != Set(wanted) {
-                let mappable = Set(tagEnv.idByTitle.keys)
+            if let wanted = plan.reminderPatch.tags, RemCTLReminders.tagKeys(actual.tags) != RemCTLReminders.tagKeys(wanted) {
+                let got = RemCTLReminders.tagKeys(actual.tags)
                 plan.fingerprint.tags = base != nil ? base!.tags
-                    : (plan.fingerprint.tags ?? []).filter { Set(actual.tags).contains($0) && mappable.contains($0) }
+                    : (plan.fingerprint.tags ?? []).filter { got.contains(TagEnvironment.key($0)) }
                 log(.warning, "\"\(title)\": Reminders did not take the tags; they will be retried")
             }
         }
@@ -388,7 +398,10 @@ extension SyncPass {
         let u = NotesLink.clean(r.url)
         var tagIds: [String] = []
         var titles: [String] = []
-        for name in r.tags { if let id = tagEnv.idByTitle[name], !tagIds.contains(id) { tagIds.append(id); titles.append(name) } }
+        for name in r.tags {
+            let key = TagEnvironment.key(name)
+            if let id = tagEnv.idByKey[key], !tagIds.contains(id) { tagIds.append(id); titles.append(tagEnv.titleByKey[key] ?? name) }
+        }
         var flagged: Bool?
         if let fid = tagEnv.flaggedId { flagged = r.flagged; if r.flagged, !tagIds.contains(fid) { tagIds.append(fid) } }
         var seen = Set<String>(), items: [Fingerprint.ChecklistEntry] = []

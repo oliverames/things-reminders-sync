@@ -8,7 +8,7 @@ struct ThingsCloudTemplateTests {
 
     @Test func templateCreateWritesTheObservedKeysAndNoOccurrence() async throws {
         let project = ThingsID.generate()
-        let cloud = FakeThingsCloud(head: 10)
+        let cloud = FakeThingsCloud(items: [projectItem(project)], head: 10)
         let client = cloud.client()
         // A plain create gives the reference key set (every key the app writes for a to-do).
         let plainId = try await client.createTodo(ThingsTodoDraft(title: "plain", placement: .project(project)))

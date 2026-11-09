@@ -8,6 +8,8 @@ import os
 /// - Writes and list lookups go through one long-lived `remctl mcp serve` session.
 /// - Reads use one `remctl export --json` run (all reminders, completed included). MCP tool results are
 ///   capped, which cuts a full export to a fraction of the rows, so the export runs as a one-shot process.
+///   Rows name their list by title; lists that share a title are told apart with one `export --list-id` run each.
+/// - A write whose answer is lost is never sent again: the reminder is re-read to see whether it landed.
 /// - RemCTL has no modification date, so `lastModified` is synthesized: a content hash per reminder id
 ///   (title, notes, due, completion, list) is kept in memory and in `remctl-observed.json`. When a hash is
 ///   new or changed the item is stamped with the time it was first seen that way; otherwise the stored
@@ -34,6 +36,9 @@ public actor RemCTLReminders: RemindersBackend {
     private var executablePath: String?
     private var titleToIds: [String: [String]] = [:]
     private var idToTitle: [String: String] = [:]
+    /// Reminder id -> list id, from the last export. Rows only carry a list title, so this is what places a reminder
+    /// whose list shares its title with another list.
+    private var knownLists: [Int: String] = [:]
     private var observed: [String: Observed] = [:]
     private var observedLoaded = false
     private var versionDetail = "Not checked yet"
@@ -100,8 +105,10 @@ public actor RemCTLReminders: RemindersBackend {
         _ = try await refreshLists()
         let wanted = Set(listIds)
         let rows = try await exportRows()
+        let lists = try await listsOfRows(rows, needed: wanted)
         let sections = try await loadSections(for: wanted)
-        return observe(rows, sections: sections).filter { wanted.contains($0.listId) }
+        return observe(rows, lists: lists, sections: sections, sectionsLoaded: wanted.intersection(sectionLists))
+            .filter { wanted.contains($0.listId) }
     }
 
     // MARK: Writing
@@ -126,8 +133,21 @@ public actor RemCTLReminders: RemindersBackend {
             }
             args["recurrence"] = .string(spec)
         }
-        let created = try await transport.callTool("create_reminder", arguments: args)
+        loadObservedIfNeeded()
+        let knownBefore = Set(observed.keys)
+        var created: JSONValue
+        do {
+            created = try await transport.callTool("create_reminder", arguments: args)
+        } catch let error as RemCTLError where error.kind == .uncertain {
+            // The answer was lost, so the reminder may exist. Never create again: look for it instead. When it cannot
+            // be found the error stands, and the engine pairs by title if it shows up later.
+            guard let found = try await findCreated(title: title, listId: listId, knownBefore: knownBefore) else { throw error }
+            logger.warning("create_reminder was not confirmed; found the new reminder \(found, privacy: .public) by re-reading")
+            created = ["id": .number(Double(found)), "status": "partial"]
+        }
         guard let id = created["id"]?.int else { throw RemCTLError.tool("RemCTL did not return the new reminder id") }
+        // From here on the reminder exists. A failure in a later step must not lose its id, or the next pass would
+        // create it a second time: the item is returned as it is and the engine retries what is missing.
         if let sectionName, created["status"]?.string == "partial" {
             // The reminder exists but the private section step failed: finish with an update, never create twice.
             var retry: [String: JSONValue] = ["reminder_id": .number(Double(id)), "private": true]
@@ -137,12 +157,50 @@ public actor RemCTLReminders: RemindersBackend {
             noteCreated(args, sectionName, listId)
         }
         if sectionName != nil { sectionCache[listId] = nil }
+        var isCompleted = false
         if completed {
-            var done: [String: JSONValue] = ["reminder_id": .number(Double(id)), "completed": true]
-            if let completionDate { done["completion_date"] = .string(Self.localISO(completionDate)) }
-            _ = try await transport.callTool("set_completion", arguments: done)
+            do {
+                try await setCompletion(id, completed: true, date: recurrence == nil ? completionDate : nil, before: nil)
+                isCompleted = true
+            } catch {
+                logger.error("Created reminder \(id, privacy: .public) but could not complete it: \(error.localizedDescription, privacy: .public)")
+            }
         }
-        return try await fetch(id: id, listHint: listId)
+        do {
+            return try await fetch(id: id, listHint: listId)
+        } catch {
+            logger.error("Created reminder \(id, privacy: .public) but could not read it back: \(error.localizedDescription, privacy: .public)")
+            knownLists[id] = listId
+            return observe(item: ReminderItem(id: String(id), listId: listId, title: title, notes: notes, due: due, completed: isCompleted,
+                                              completionDate: isCompleted ? completionDate : nil, isRepeating: recurrence != nil,
+                                              section: sectionLists.contains(listId) ? sectionName : nil, recurrence: recurrence))
+        }
+    }
+
+    /// The id of a reminder that a lost `create_reminder` answer may have made: the only reminder with that title in
+    /// the list that was not there at the last read. Nil when there is none, or more than one.
+    private func findCreated(title: String, listId: String, knownBefore: Set<String>) async throws -> Int? {
+        let rows = try await exportRows()
+        let lists = try await listsOfRows(rows, needed: [listId])
+        let hits = rows.compactMap(Row.init).filter {
+            !$0.isSubtask && $0.title == title && lists[$0.id] == listId && !knownBefore.contains(String($0.id))
+        }
+        return hits.count == 1 ? hits[0].id : nil
+    }
+
+    /// `set_completion`, sent once. When the answer is lost the reminder is re-read: a completion that landed shows as
+    /// the wanted state, or (a repeating reminder, which advances instead) as a due date that moved on from `before`.
+    /// RemCTL itself never repeats an uncertain completion of a repeating reminder, because each one advances the series.
+    private func setCompletion(_ id: Int, completed: Bool, date: Date?, before: Row?) async throws {
+        var args: [String: JSONValue] = ["reminder_id": .number(Double(id)), "completed": .bool(completed)]
+        if completed, let date { args["completion_date"] = .string(Self.localISO(date)) }
+        do {
+            _ = try await transport.callTool("set_completion", arguments: args)
+        } catch let error as RemCTLError where error.kind == .uncertain {
+            let after = try await row(id: id)
+            let advanced = completed && after.isRepeating && before != nil && before?.due != after.due
+            guard after.completed == completed || advanced else { throw error }
+        }
     }
 
     public func update(id: String, patch: ReminderPatch) async throws -> ReminderItem {
@@ -152,12 +210,15 @@ public actor RemCTLReminders: RemindersBackend {
         if let title = patch.title { fields["title"] = .string(title) }
         if let notes = patch.notes { fields["notes"] = .string(notes) }   // "" clears the notes
         if let due = patch.due {
+            // Only the due date is sent. RemCTL itself moves an alarm that sat at the old due time (or removes it when
+            // the due becomes all-day or is cleared) and leaves every other alarm alone; an explicit `alarm` would
+            // replace them, and `alarm: clear` removes them all (early and custom alerts included).
             if let due, let spec = Self.dueSpec(due) {
                 fields["due"] = .string(spec.due)
-                fields["alarm"] = .string(spec.alarm ?? "clear")   // an all-day due must not keep a stale alarm
+                // A reminder with no alarm at all gets one at the new time, so a newly timed due still notifies.
+                if let alarm = spec.alarm, try await row(id: numeric).hasAlarms == false { fields["alarm"] = .string(alarm) }
             } else {
                 fields["due"] = "clear"
-                fields["alarm"] = "clear"
             }
         }
         if let recurrence = patch.recurrence {
@@ -195,7 +256,15 @@ public actor RemCTLReminders: RemindersBackend {
         }
         if !fields.isEmpty {
             fields["reminder_id"] = .number(Double(numeric))
-            let result = try await transport.callTool("update_reminder", arguments: fields)
+            var result: JSONValue = .null
+            do {
+                result = try await transport.callTool("update_reminder", arguments: fields)
+            } catch let error as RemCTLError where error.kind == .uncertain {
+                // Never sent again (subtasks would be added twice, a move could copy twice). The reminder is re-read:
+                // when it shows what was written the write landed; otherwise the error stands and the next pass retries.
+                guard patch.addSubtasks?.isEmpty ?? true, patch.listId == nil,
+                      try await plainFieldsLanded(patch, id: numeric) else { throw error }
+            }
             // A move into a shared list (or one EventKit rejects) copies the reminder: the result carries the
             // new id (plus `oldId`), and everything after the move must use it.
             if let newId = result["id"]?.int { current = newId }
@@ -208,18 +277,23 @@ public actor RemCTLReminders: RemindersBackend {
             if let listId, let name = writableSection(wanted, listId: listId) {
                 var args: [String: JSONValue] = ["reminder_id": .number(Double(current)), "private": true]
                 args.merge(try await sectionArguments(name, listId: listId)) { $1 }
-                _ = try await transport.callTool("update_reminder", arguments: args)
+                do {
+                    _ = try await transport.callTool("update_reminder", arguments: args)
+                } catch let error as RemCTLError where error.kind == .uncertain {
+                    let now = try await row(id: current)
+                    guard Self.sectionKey(now.section ?? "") == Self.sectionKey(name) else { throw error }
+                }
                 noteCreated(args, name, listId)
                 sectionCache[listId] = nil
             }
         }
         if let completed = patch.completed {
-            var done: [String: JSONValue] = ["reminder_id": .number(Double(current)), "completed": .bool(completed)]
-            // RemCTL rejects a completion date on a recurring reminder.
-            if completed, let date = patch.completionDate, try await row(id: current).isRepeating == false {
-                done["completion_date"] = .string(Self.localISO(date))
-            }
-            _ = try await transport.callTool("set_completion", arguments: done)
+            // Read first: RemCTL rejects a completion date on a recurring reminder, and the due date before the write
+            // is what tells whether an unconfirmed completion of one landed.
+            var before: Row?
+            if completed { before = try await row(id: current) }
+            try await setCompletion(current, completed: completed, date: before?.isRepeating == false ? patch.completionDate : nil,
+                                    before: before)
         }
         var item = try await fetch(id: current, listHint: patch.listId)
         // Private (ReminderKit) writes land a moment after the call returns, so an immediate read can still show
@@ -238,8 +312,23 @@ public actor RemCTLReminders: RemindersBackend {
     private var privateReadBackDelays: [Duration] = [.milliseconds(300), .milliseconds(700), .milliseconds(1500)]
     func setPrivateReadBackDelays(_ delays: [Duration]) { privateReadBackDelays = delays }
 
+    /// True when a re-read shows every plain field of the patch (title, notes, due, repeat) as written.
+    private func plainFieldsLanded(_ patch: ReminderPatch, id: Int) async throws -> Bool {
+        let now = try await row(id: id)
+        if let title = patch.title, now.title != title { return false }
+        if let notes = patch.notes, now.notes != notes { return false }
+        if let due = patch.due, now.due != due { return false }
+        if let recurrence = patch.recurrence {
+            if let rule = recurrence { if now.recurrence?.key != rule.key { return false } } else if now.isRepeating { return false }
+        }
+        return true
+    }
+
+    /// Reminders treats tags that differ only in case as one tag, so they compare without case.
+    static func tagKeys(_ tags: [String]) -> Set<String> { Set(tags.map { $0.lowercased() }) }
+
     static func privateFieldsLanded(_ patch: ReminderPatch, in item: ReminderItem) -> Bool {
-        if let tags = patch.tags, Set(tags) != Set(item.tags) { return false }
+        if let tags = patch.tags, tagKeys(tags) != tagKeys(item.tags) { return false }
         if let flagged = patch.flagged, flagged != item.flagged { return false }
         if patch.url != nil, item.url == nil { return false }
         return true
@@ -251,6 +340,9 @@ public actor RemCTLReminders: RemindersBackend {
             _ = try await transport.callTool("delete_reminder", arguments: ["reminder_id": .number(Double(numeric))])
         } catch let error as RemCTLError where error.kind == .tool && error.message.lowercased().contains("not found") {
             return   // already gone
+        } catch let error as RemCTLError where error.kind == .uncertain {
+            // Not sent again: the delete landed when the reminder can no longer be read.
+            if (try? await row(id: numeric)) != nil { throw error }
         }
         observed[id] = nil
         persistObserved()
@@ -315,8 +407,7 @@ public actor RemCTLReminders: RemindersBackend {
 
     private func listIdOfReminder(_ id: Int) async throws -> String? {
         let current = try await row(id: id)
-        if listId(forTitle: current.list) == nil { _ = try await refreshLists() }
-        return listId(forTitle: current.list)
+        return try? await resolveList(of: current, hint: nil)
     }
 
     /// Reminder id to section name for the given lists, from `remctl show --completed` (the export has no sections).
@@ -361,12 +452,13 @@ public actor RemCTLReminders: RemindersBackend {
                 _ = try await refreshLists()
                 let scope = watched
                 let rows = try await exportRows()
+                let lists = try await listsOfRows(rows, needed: scope)
                 // Cheap change probe: hash the raw export rows of the watched lists. It never reads
                 // sections and never touches the observed-modification stamps (a poll without sections
                 // would flip every sectioned reminder's hash and fake edits). A move between sections
                 // alone does not change the export, so it syncs at the next full reconcile.
                 let digest = Self.sha(rows.filter { row in
-                    scope.isEmpty || listId(forTitle: row["list"]?.string).map(scope.contains) == true
+                    scope.isEmpty || row["id"]?.int.flatMap { lists[$0] }.map(scope.contains) == true
                 }.map { $0.serialized() }.sorted().joined(separator: "\n"))
                 if let last, last.scope == scope, last.digest != digest { continuation.yield() }
                 last = (scope, digest)
@@ -422,6 +514,8 @@ public actor RemCTLReminders: RemindersBackend {
         var url: String?
         var tags: [String]
         var flagged: Bool
+        /// `get_reminder` only (the export does not list alarms): the reminder has at least one alarm of any kind.
+        var hasAlarms: Bool
 
         init?(_ json: JSONValue) {
             guard let id = json["id"]?.int else { return nil }
@@ -430,7 +524,9 @@ public actor RemCTLReminders: RemindersBackend {
             list = json["list"]?.string
             notes = json["notes"]?.string ?? ""
             let allDay = json["allDay"]?.flag ?? false
-            due = json["dueDate"]?.string.flatMap { RemCTLReminders.parseDue($0, allDay: allDay) }
+            let display = json["displayDate"]?.string
+            due = json["dueDate"]?.string.flatMap { RemCTLReminders.parseDue($0, allDay: allDay, displayDate: display) }
+            hasAlarms = !(json["alarms"]?.array ?? []).isEmpty
             completed = json["completed"]?.flag ?? false
             completionDate = json["completionDate"]?.string.flatMap(RemCTLReminders.parseLocal)
             isRepeating = json["recurrence"].map { !$0.isNull } ?? false
@@ -460,11 +556,48 @@ public actor RemCTLReminders: RemindersBackend {
 
     private func fetch(id: Int, listHint: String?) async throws -> ReminderItem {
         let row = try await row(id: id)
-        if listId(forTitle: row.list) == nil, listHint == nil { _ = try await refreshLists() }
-        guard let list = listHint ?? listId(forTitle: row.list) else {
-            throw RemCTLError.tool("Could not tell which Reminders list \"\(row.list ?? "")\" is; its title is not unique")
-        }
+        let list = try await resolveList(of: row, hint: listHint)
+        knownLists[id] = list
         return observe(item: Self.item(row, listId: list, section: sectionLists.contains(list) ? row.section : nil))
+    }
+
+    /// The list a `get_reminder` row is in: the hint, else the only list with the row's title, else (a title shared
+    /// by several lists) the list the reminder was last exported in, as long as that list still has that title.
+    private func resolveList(of row: Row, hint: String?) async throws -> String {
+        if let hint { return hint }
+        if listId(forTitle: row.list) == nil, titleToIds[row.list ?? ""] == nil { _ = try await refreshLists() }
+        if let unique = listId(forTitle: row.list) { return unique }
+        if let known = knownLists[row.id], idToTitle[known] == row.list { return known }
+        throw RemCTLError.tool("Could not tell which Reminders list \"\(row.list ?? "")\" is; its title is not unique")
+    }
+
+    /// Reminder id -> list id for the export rows. A row only names its list by title, so when several lists share a
+    /// title each of them is exported by id (`remctl export --list-id N`) to place its rows. `needed` limits that extra
+    /// work to titles that involve one of those lists (empty: all). A needed row that cannot be placed throws: a pass
+    /// must never read "could not tell which list" as "the list is empty", which would look like deletions.
+    private func listsOfRows(_ rows: [JSONValue], needed: Set<String>) async throws -> [Int: String] {
+        var map: [Int: String] = [:]
+        var shared: Set<String> = []
+        for json in rows {
+            guard let id = json["id"]?.int, let title = json["list"]?.string, let ids = titleToIds[title] else { continue }
+            if ids.count == 1 { map[id] = ids[0] } else { shared.insert(title) }
+        }
+        for title in shared.sorted() {
+            let ids = titleToIds[title] ?? []
+            guard needed.isEmpty || !needed.isDisjoint(with: ids) else { continue }
+            for list in ids.sorted() {
+                let output = try await transport.runCLI(["export", "--list-id", list, "--json"])
+                guard let own = output.array ?? output["items"]?.array else {
+                    throw RemCTLError.tool("Unexpected export output from RemCTL for list \(list)")
+                }
+                for json in own { if let id = json["id"]?.int { map[id] = list } }
+            }
+            if rows.contains(where: { $0["list"]?.string == title && $0["id"]?.int.map { map[$0] == nil } == true }) {
+                throw RemCTLError.tool("Could not tell which of the Reminders lists named \"\(title)\" a reminder is in")
+            }
+        }
+        knownLists.merge(map) { $1 }
+        return map
     }
 
     private func exportRows() async throws -> [JSONValue] {
@@ -477,12 +610,13 @@ public actor RemCTLReminders: RemindersBackend {
 
     // MARK: Synthesized modification time
 
-    /// Maps export rows to items (skipping subtasks and lists whose title is ambiguous), stamps
-    /// `lastModified`, and prunes stored hashes for reminders that no longer exist.
-    private func observe(_ rows: [JSONValue], sections: [Int: String]) -> [ReminderItem] {
+    /// Maps export rows to items (skipping subtasks and rows without a known list), stamps `lastModified`, and
+    /// prunes stored hashes for reminders that no longer exist. `sectionsLoaded` are the section-mirroring lists whose
+    /// sections this read loaded: rows of the other such lists are left alone, because hashing them without their
+    /// section would stamp every sectioned reminder there as modified now.
+    private func observe(_ rows: [JSONValue], lists: [Int: String], sections: [Int: String], sectionsLoaded: Set<String>) -> [ReminderItem] {
         var items: [ReminderItem] = []
         var seen: Set<String> = []
-        var skipped: Set<String> = []
         // Subtask rows are not reminders of their own: each is listed on its parent (checklist items in Things).
         var subtasks: [Int: [ReminderSubtask]] = [:]
         for json in rows {
@@ -493,14 +627,11 @@ public actor RemCTLReminders: RemindersBackend {
             guard let row = Row(json) else { continue }
             seen.insert(String(row.id))
             if row.isSubtask { continue }
-            guard let list = listId(forTitle: row.list) else {
-                if let title = row.list, (titleToIds[title]?.count ?? 0) > 1 { skipped.insert(title) }
-                continue
-            }
+            guard let list = lists[row.id] else { continue }
+            if sectionLists.contains(list), !sectionsLoaded.contains(list) { continue }
             let section = sectionLists.contains(list) ? sections[row.id] : nil
             items.append(observe(item: Self.item(row, listId: list, section: section, subtasks: subtasks[row.id] ?? []), persist: false))
         }
-        for title in skipped { logger.warning("Skipping reminders in \(title, privacy: .public): several lists share that title") }
         for id in observed.keys where !seen.contains(id) { observed[id] = nil }
         persistObserved()
         return items
@@ -580,10 +711,16 @@ public actor RemCTLReminders: RemindersBackend {
         SHA256.hash(data: Data(string.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
-    /// `2026-11-09T09:00:00` (local). With `allDay` the time part is ignored.
-    static func parseDue(_ text: String, allDay: Bool) -> DueDate? {
+    /// `2026-11-09T09:00:00` (local). With `allDay` the time part is ignored, unless `displayDate` (the time
+    /// Reminders shows the item at, from an alert on the due day) carries a time on that same day: Reminders then
+    /// shows "Nov 9, 9:00 AM", so the item is read as due at that time.
+    static func parseDue(_ text: String, allDay: Bool, displayDate: String? = nil) -> DueDate? {
         let parts = text.split(separator: "T", maxSplits: 1).map(String.init)
         guard let day = parts.first, day.count == 10, day.split(separator: "-").count == 3 else { return nil }
+        if allDay, let displayDate, let shown = parseDue(displayDate, allDay: false), shown.day == day,
+           let minutes = shown.minutes, minutes > 0 {
+            return shown
+        }
         guard !allDay, parts.count == 2 else { return DueDate(day: day) }
         let time = parts[1].split(separator: ":").prefix(2).compactMap { Int($0) }
         guard time.count == 2 else { return DueDate(day: day) }

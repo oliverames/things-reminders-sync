@@ -16,7 +16,10 @@ always-on Mac.
   `~/Library/Application Support/ThingsRemindersSync/remctl-observed.json`. A new or changed hash stamps
   `lastModified = now`; an unchanged one keeps its stored stamp. Conflict resolution ("later modification
   wins") therefore has the resolution of the poll interval, and the first run treats every reminder as
-  modified at that moment.
+  modified at that moment. The same holds after sleep or a restart: a reminder edited in the meantime is
+  stamped when the app next reads it. A read of some lists never stamps the rows of a section-mirroring
+  list whose sections that read did not load (hashing them without their section would mark every
+  sectioned reminder there as modified now).
 - **Things → app:** Things Cloud has no third-party push. Every `pollSeconds` (default 15) the app
   calls `GET /version/1/history/{key}` (one small request) and pulls only new history items when the
   head moved. Changed task ids come from the pulled change maps.
@@ -30,18 +33,33 @@ always-on Mac.
 Capability Host authorized for Reminders; the app needs no Reminders permission and never prompts.
 
 - Transport: one long-lived `remctl mcp serve` child (JSON-RPC lines on stdio, handshake once, requests
-  serialized, 30 s timeout, restart once on EOF/crash/timeout, stderr drained). Tools used: `lists`,
+  serialized, 30 s timeout, restart on EOF/crash/timeout, stderr drained). After a restart a call is sent again only
+  when that is safe: the reads (`lists`, `get_reminder`, `get_list`), and any call that failed before its request
+  line was written. A write that was sent and got no answer throws `.uncertain` and is never sent again. The backend
+  then re-reads: `create_reminder` looks for the one new reminder with that title in the list, `set_completion`
+  checks the completed state (for a repeating reminder, whether the due date moved on), `update_reminder` checks
+  title, notes, due and repeat (a write with `subtasks` or a list move is never assumed), `delete_reminder` checks
+  that the reminder is gone. What cannot be confirmed stays an error and the next pass decides from a fresh read.
+  Once `create_reminder` has returned an id, a failure in a later step (completion, read-back) no longer loses the
+  reminder: it is returned as it is. Tools used: `lists`,
   `create_reminder`, `update_reminder`, `set_completion`, `delete_reminder`, `get_reminder`, `get_list` (section names).
   Link, flag, tags and subtasks are written by `update_reminder` with `private: true`: `url`, `flagged`, `set_tags` (ONE comma-separated
   string) or `clear_tags`, `subtasks` (array of titles). A subtask is otherwise a reminder: complete, rename or delete it by its own id.
 - Reads: `remctl export --json` as a one-shot process, because MCP tool results are capped (about 170 KB,
-  which cuts the export to roughly a third of the rows). List titles in rows map to list ids through
-  the latest `lists` result; rows in lists whose title is shared by several lists are skipped and logged.
+  which cuts the export to roughly a third of the rows). Rows name their list by title only. A title that one
+  list has maps to its id through the latest `lists` result. A title shared by several lists is settled by id:
+  each of those lists is exported on its own (`remctl export --list-id N --json`) and its rows are placed in it.
+  If that fails, or a row still cannot be placed, the read throws. A read never returns a list as empty because
+  its rows could not be placed, since the engine would take that for deletions.
   Subtask rows (`isSubtask`, `parentID`) are never items: each is listed on its parent as `subtasks`. Rows also carry `url` (rich
   link), `tags` and `flagged`. Ids are RemCTL's numeric ids as strings.
-- Due dates: `dueDate` plus `allDay` map to `DueDate` (the time part is ignored when all-day). A timed due
-  is written with an `alarm` at the same instant (mirroring the Things reminder); clearing a due also
-  clears the alarm. Any `recurrence` means repeating (see "Repeating items"). Completion uses `set_completion`,
+- Due dates: `dueDate` plus `allDay` map to `DueDate` (the time part is ignored when all-day). An all-day row
+  whose `displayDate` (the time Reminders shows the item at, from an alert) is on the due day with a time of day
+  is read as due at that time. A new timed reminder is created with an `alarm` at the same instant (mirroring the
+  Things reminder). A due date UPDATE sends `due` only: RemCTL itself moves an alarm that sat at the old due time,
+  or removes it when the due becomes all-day or is cleared, and leaves every other alarm alone. `alarm: clear` is
+  never sent, because it removes every alarm. The one exception: a reminder with no alarm at all (`alarms` in
+  `get_reminder`) that gets a timed due also gets an `alarm` at that instant, so it notifies. Any `recurrence` means repeating (see "Repeating items"). Completion uses `set_completion`,
   omitting `completion_date` for repeating reminders.
 - Sections: `remctl export --json` rows carry no `section` (checked against RemCTL 2.5.0); `get_reminder` and
   `remctl show --list-id N --completed --json` do. So for the lists registered with
@@ -70,7 +88,8 @@ Essentials:
 - Commit: `POST /version/1/history/{key}/commit?ancestor-index=N&_cnt=1` with headers `Schema: 301`,
   `App-Id: com.culturedcode.ThingsMac`, `App-Instance-Id` (use `-things-reminders-sync`),
   `Push-Priority: 5`. Body: `{ "<uuid>": { "t": 0|1|2, "e": "Task6", "p": {...} } }`
-  (t 0 create, 1 update, 2 delete). On 409/412 refetch the head and retry once.
+  (t 0 create, 1 update, 2 delete). On 409/412 refetch the head and retry once. A to-do update is not resent
+  as it was: the client pulls what the other client wrote and builds the change again from the current to-do.
 - Change maps: entity `e` is versioned (`Task6`, `Task7` from the 3.24 Mac app, `Area3`, `Tag4`,
   `ChecklistItem3`, `Settings5`). Decode any `Task*` as a task. Keys: `tt` title, `nt` note object
   (`{_t:"tx", t:1, ch:crc32, v:text}` full, or `t:2` with `ps` patches: see `applyNotePatches`),
@@ -82,6 +101,22 @@ Essentials:
 - Scheduling rules: see `schedulingFields` and `withReminder` in the JS. A start date today or
   earlier is `st 1` with `sr = tir = day`; a future date is `st 2` with `sr = tir = day`; no date is
   `st 1, sr null, tir null` (Anytime). A reminder time needs a start date.
+- Updates carry only what changes (`ThingsChanges.schedulingUpdate`, `ThingsCloudClient.updateChanges`):
+  - A new time on the same day writes `ato` alone, as the JavaScript client does for a reminder-only edit.
+  - Another day, or no day, writes `st`, `sr`, `tir`, `ato`. `sb 0` is added only when the to-do is in This Evening
+    (`sb 1`) at that moment. `sb` is never written otherwise, so a sync does not take a to-do out of This Evening.
+  - A move (`pr`/`agr`/`ar`) of an Inbox to-do (`st 0`) into a project, area or heading also writes `st 1`, as the
+    JavaScript client does (it also writes `sb 0`; this client leaves `sb` alone, an Inbox to-do has none).
+    `.inbox` placement writes `st 0` for an Anytime to-do without a start date. A dated to-do, a Someday to-do and a
+    repeating template keep their `st`: the Inbox holds no dated to-dos, and the others stay where the user put them.
+  - `tg` is the whole list and `nt` the whole text, so before a tag or notes write the client pulls new history and
+    builds from the to-do as it is then. Tag ids that no longer exist are dropped. A notes write names the notes it
+    was planned against (`notesBase`); if the to-do's notes changed in Things since, the write is refused
+    (`changedMeanwhile`) and the next pass merges again. History pulled for a write is reported by the next `refresh()`.
+- Area and tag tombstones: `deleteArea` writes `{ar: [], md}` on every task that names the area and `deleteTag`
+  writes `{tg: <without it>, md}` on every task that carries the tag (trashed tasks included), in the same commit as
+  the `t 2` tombstone, as the JavaScript client does. `deleteTag` is refused while an area carries the tag or a tag
+  nests under it, because this client writes no `Area3` or `Tag4` update.
 
 ### IDs and validation (this crashed Things on 2026-11-09; do not regress)
 
@@ -92,6 +127,11 @@ encoding 16 random bytes. Before every commit, validate: each entity id and each
 `ar`, `tg`, `ts`, `rt`, `dl`, `pn` decodes to exactly 16 bytes; `cd`, `md`, `sp`, `lai` are finite
 unix seconds in [0, 4102444800]; `sr`, `tir`, `dd` are also midnight UTC. Refuse the whole commit
 otherwise. Port `isThingsId` / `validateChangeMap` from the JS and its tests.
+
+References must also be live (`ThingsChangeValidator.referenceProblems`, run in `commit` against the client's
+database): `pr` a project, `agr` a heading, `ts` a to-do, none of them trashed, `ar` an area, `tg` tags. An item
+the same commit creates counts, one it deletes does not. A miss is checked once more after pulling new history
+(the item may have been created elsewhere), then the commit is refused.
 
 ## Mapping model
 
@@ -106,7 +146,10 @@ Each enabled `ListMapping` links one Reminders list to one Things target:
 
 If `targetId` is nil, create the project/area/tag/heading named `targetTitle` (project inside
 `projectAreaId` when set; a heading inside `parentProjectId`, and with no `parentProjectId` the mapping is skipped
-with a warning) on the first sync and store the new id back in the config.
+with a warning) on the first sync and store the new id back in the config. The target is created only after both
+sides have been read, and nothing after those reads can fail the pass, so a pass that cannot read creates nothing
+(creating first made a new target on every failed pass). A project whose area, or a heading whose project, no
+longer exists is not created; the mapping is skipped with a warning.
 A Things item that matches several mappings belongs to the first one in `config.mappings` order, except that heading
 mappings are tried before every other mode, so a to-do under a mapped heading is never also claimed by a project
 mapping of the same project, wherever that mapping is listed. Several lists may map to different headings of one project.
@@ -181,7 +224,8 @@ they are until one side is edited.
 and one `.info` is logged per full pass. Two-way: the side that differs from the agreed value wins (a missing agreed value reads
 as unflagged, so an upgrade unites flags and removes none). Written with `update --private flagged`.
 
-**Tags.** Only titles that already exist in Things (exact match; this app never creates a tag; titles with a comma are skipped
+**Tags.** Only titles that already exist in Things (matched without case, because Reminders treats tags that differ only in case
+as one; this app never creates a tag for a reminder's tag; titles with a comma are skipped
 because `set_tags` takes one comma-separated string), minus the flagged tag and every tag a tag-mode list owns. Set merge against the
 agreed titles: a title added on a side is added to the other, a title removed from a side is removed from the other, and a
 conflict cannot arise. A Reminders tag with no Things counterpart is preserved and never removed. Reminders is written with
@@ -221,6 +265,18 @@ validator are in docs/RECURRENCE.md; code in `Engine/RepeatSync.swift`.
   advances (`repeatMode` `.reminderRepeats`).
 - A template that stops repeating clears the reminder's rule; a reminder that stops repeating unlinks
   the pair. Deleting the reminder trashes the template and its open occurrences.
+- A new time on the same day for a repeating reminder moves the open occurrence and also writes `ato` on the
+  template (`templateMinutes`), so the occurrences Things makes later keep the time.
+- A plain pair that becomes repeating stays linked. In Things, a repeat puts the rule on a NEW template and makes
+  the linked to-do its first occurrence (or removes it when the first date is in the future): the link moves to
+  that template and the reminder gets the rule and the template's next day. When the to-do was removed, the
+  template is the only new, unlinked template with the same title in the list's target. In Reminders, a repeat
+  turns the pair into a `.reminderRepeats` pair: the to-do stands for the current occurrence. When the reminder
+  moves on, the replacement is a template if the rule has a verified Things shape (the pair is then a template
+  pair), else a plain to-do again. A Things rule Reminders cannot hold still falls back as above.
+- `.reminderRepeats`: as soon as the reminder is on its next occurrence the link is saved with
+  `awaitingReplacement`, before the Things writes that can still fail. The next pass then creates the missing
+  to-do and does not complete the reminder again (it used to skip an occurrence).
 
 ### Sections and headings
 
@@ -260,8 +316,10 @@ For each linked pair on a pass:
 
 1. Compute the current fingerprint of each side.
 2. Neither changed → nothing. One side changed → copy its changed fields to the other side.
-3. Both changed → per field, the side with the later modification date wins (Reminders
-   `lastModifiedDate`, Things `md`). Log a `.warning` naming the item.
+3. Both changed → per field, the side with the later modification date wins. That date is per item, not per
+   field: Things `md` is the last change to anything on the to-do, and the Reminders time is synthesized (see
+   Change detection), so it is the moment the app first saw the change. A field edited later on one side can
+   therefore lose to an unrelated later edit of the same item on the other side. Log a `.warning` naming the item.
 4. After a successful write, store the new fingerprint, so the echo from the other side is a no-op.
    This is the loop guard; there are no other flags.
 
@@ -269,15 +327,20 @@ Unlinked items in scope: a new item on one side creates its partner on the other
 of a mapping, pair existing open items by exact (trimmed, case-insensitive) title before creating
 anything, so turning a mapping on never duplicates. Completed items are only linked on first link
 when `includeCompletedOnFirstLink`. After first link, newly completed unlinked items are ignored.
+The same title pairing runs on every later pass, over every unlinked open item of the list on both sides
+whatever started the pass. It catches a partner whose creation landed although the pass lost track of it (a lost
+answer, a failed follow-up step, a quit mid-pass): the two are linked instead of each being copied again. A pair
+found this way has no `copySide`, so neither item is ever removed as "the app's copy". When notes differ on a
+title pairing, the Things notes replace the Reminders notes and a `.warning` names the item.
 
 Deletions (only when `propagateDeletes`): a linked reminder that disappears → trash the Things
 to-do (never a permanent delete). A linked Things to-do that is trashed or deleted → delete the
 reminder. An item that moves out of scope (to an unmapped list, out of the mapped project) → drop
 the link and leave both items alone. Never delete anything that was not linked.
 
-Safety limits: if one pass would delete or trash more than 10 items or more than 25% of a mapping's
-links, skip those deletions, log an `.error`, and set phase to `.error` until the user runs Sync
-Now. Never empty the Things Trash. Never touch Reminders lists that are not mapped.
+Safety limits: if one pass would delete or trash more than 10 items (in one mapping, or over all mappings
+together) or more than 25% of a mapping's links, skip those deletions, log an `.error`, and set phase to
+`.error` until the user runs Sync Now. The 25% rule never holds a single deletion in a mapping. Never empty the Things Trash. Never touch Reminders lists that are not mapped.
 
 ## Ownership ledger and cleanup
 
@@ -297,8 +360,11 @@ Nothing the app did not create is ever removed. `links.json` carries a ledger (o
 Cleanup, always limited to ledger entries and never to a container a mapping still targets:
 
 - **Retarget:** after linked to-dos move to the new target, an app-created old project/heading (Trash), area, or tag (deleted)
-  that holds nothing left is removed. "Empty" means no non-trashed to-dos, open or done (projects: directly or under a heading;
-  areas: no projects either; tags: none carrying it and no child tags).
+  that holds nothing left is removed. "Empty" for a project or heading means no non-trashed to-dos, open or done (projects:
+  directly or under a heading). Areas and tags are deleted for good, so for them the Trash counts: an area is empty when no
+  to-do or project names it, trashed or not, and a tag when no task or area carries it and no tag nests under it. The to-dos
+  a "stop syncing" run has just moved to the Trash itself do not count. The backend takes the area or tag off every task
+  that still names it before the tombstone.
 - **Full pass end** (only when the pass had no failures): app-created headings with no non-trashed to-dos go to the Trash, and
   app-created Reminders sections holding no reminders are deleted (`remctl section-delete`). Both are re-read first.
   Groceries lists are skipped.
@@ -361,7 +427,7 @@ or real Reminders. No test fixtures may contain anyone's real task data.
 |---|---|
 | To another section | To-do moves under the matching heading (at the next full reconcile) |
 | To a list synced to a project, area, or heading | To-do moves there |
-| To a list synced to a tag | To-do gets the tag and moves to the Inbox (otherwise two lists would claim it) |
+| To a list synced to a tag | To-do gets the tag and leaves its project or area (otherwise two lists would claim it). With no start date it goes to the Inbox (`st 0`); a dated or Someday to-do keeps its place in Today, Upcoming or Someday |
 | To an unsynced list | Link parked; both items stay. Moving it back relinks it |
 | Deleted | To-do moved to the Things Trash |
 
