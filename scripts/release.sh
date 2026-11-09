@@ -27,7 +27,7 @@ swift test --package-path "$ROOT" >/dev/null
 
 SIGN_IDENTITY="$SIGN_IDENTITY" VERSION="$VERSION" BUILD_NUMBER="$BUILD_NUMBER" TIMESTAMP_FLAG="--timestamp" "$ROOT/scripts/build-app.sh" release
 codesign --verify --strict --deep "$APP"
-codesign -dv "$APP" 2>&1 | grep -q "Authority=Developer ID Application" || { echo "error: not signed with Developer ID" >&2; exit 1; }
+codesign -dvv "$APP" 2>&1 | grep -q "Authority=Developer ID Application" || { echo "error: not signed with Developer ID" >&2; exit 1; }
 
 mkdir -p "$DIST"
 SUBMIT="$(mktemp -d)/submit.zip"
