@@ -106,11 +106,11 @@ actor FakeRemCTL: RemCTLTransport {
             return .array(rows.keys.sorted().compactMap { rows[$0] }.filter { $0["list"]?.string == title })
         }
         if arguments == ["sections", "--json"] {
-            // Like the real command: an object keyed by list title, only for lists that have sections.
+            // Like the real command: list title -> section names (strings), only for lists that have sections.
             var byList: [String: [JSONValue]] = [:]
             for row in rows.values {
                 if let list = row["list"]?.string, let name = row["section"]?.string, !name.isEmpty {
-                    byList[list, default: []].append(.object(["name": .string(name)]))
+                    byList[list, default: []].append(.string(name))
                 }
             }
             return .object(byList.mapValues { .array($0) })
