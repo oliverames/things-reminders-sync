@@ -126,6 +126,29 @@ either side). Things items that are trashed are out of scope except as deletions
 | list | placement per the mapping (moving between mapped lists moves between targets, and back) |
 | section (project mode, `syncSections`) | heading title of the to-do in the target project |
 
+### Field fidelity (planned, verified against RemCTL 2.5.0 on 2026-11-09)
+
+Each side keeps its own display conventions; a field one side cannot represent is preserved and
+never cleared by the sync. Patches carry only the fields that changed (never a whole-item rewrite).
+
+`remctl export --json` already reports everything below in one call, so no per-reminder reads:
+`url` (the rich link), `tags` (names), `flagged`, `subtaskCount`, and subtask rows with
+`isSubtask: true` and `parentID`. Subtask rows are not reminders in their own right for the sync:
+they must never be linked to Things to-dos.
+
+| Reminders | Things | Rule |
+|---|---|---|
+| rich link (`url`) | a bare URL as the last line of the notes, after a blank line | Reminders → Things: append the line unless the URL already appears in the notes. Things → Reminders: when the reminder has no link, a trailing URL line becomes the rich link (`--private --url`) and is left out of the Reminders notes. RemCTL can only add a rich link, never replace or clear one ([viticci/remctl#79](https://github.com/viticci/remctl/issues/79)), so when the reminder already has a different link, the Things line stays in the Reminders notes as text. Links inside the note text stay in the notes on both sides. |
+| notes (plain text) | notes (Markdown) | Things is authoritative for Markdown. Reminders gets a plain rendering (`[t](u)` → `t (u)`, emphasis markers and heading `#`s dropped). The link fingerprint stores the rendering, so Things Markdown is replaced only when the Reminders notes are edited. |
+| flagged | the tag named in settings (default "Important") | two-way; `update --private flagged`. |
+| tags | tags with the same title | two-way, only for titles that already exist in Things (no tag creation); the list's own mapping tag is excluded; `--private --set-tags`. |
+| subtasks (title, completed) | checklist items (`ChecklistItem3`: `tt`, `ss`, `ix`, `ts` = [task id]) | two-way; add with `--private --subtask`, complete or rename with the subtask's own id, delete the subtask reminder to remove one. Checklist key shapes must be sampled from Things 3.24 before the first write. |
+| priority, urgent, early reminders, alarms other than the due time, location, images, assignee | none | preserved |
+| none | deadline (`dd`), This Evening, checklist notes | preserved |
+
+Fingerprints are seeded from a re-read of the written item, and a skipped or failed write keeps the
+previous fingerprints (lessons from Remindian issues #74, #75 and #99).
+
 ### Sections and headings
 
 Things headings only exist inside projects. A `project` mapping with `syncSections` (default true) mirrors
