@@ -18,12 +18,15 @@ public struct Fingerprint: Codable, Hashable, Sendable {
     /// A Reminders section the reminder could not be removed from (RemCTL cannot clear one) while the
     /// Things side sits at no heading. A reminder still reading this section is not a change.
     public var stuckSection: String?
+    /// For a repeating pair: the rule both sides last agreed on (compared through `RepeatRule.key`). Nil for plain
+    /// pairs, and for a repeating pair whose rule cannot be synced. Links saved before repeating sync decode it as nil.
+    public var rule: RepeatRule?
 
     public init(title: String, notes: String, due: DueDate?, completed: Bool, completionDay: String?,
-                group: String? = nil, stuckSection: String? = nil) {
+                group: String? = nil, stuckSection: String? = nil, rule: RepeatRule? = nil) {
         self.title = title; self.notes = notes; self.due = due
         self.completed = completed; self.completionDay = completionDay
-        self.group = group; self.stuckSection = stuckSection
+        self.group = group; self.stuckSection = stuckSection; self.rule = rule
     }
 
     static func normalize(_ text: String) -> String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -99,10 +102,14 @@ public struct LinkRecord: Codable, Hashable, Sendable, Identifiable {
     public var copySide: Side?
     /// True when the copy was made because "include completed on first link" brought a completed item over.
     public var copiedCompleted: Bool
+    /// How a repeating item is paired; nil for plain pairs (including a plain pair on one occurrence of a Things
+    /// template whose rule Reminders cannot hold).
+    public var repeatMode: RepeatLinkMode?
 
     public init(id: UUID = UUID(), reminderId: String, reminderExternalId: String? = nil, thingsId: String,
                 mappingId: String, fingerprint: Fingerprint, lastSynced: Date = Date(),
-                copySide: Side? = nil, copiedCompleted: Bool = false) {
+                copySide: Side? = nil, copiedCompleted: Bool = false, repeatMode: RepeatLinkMode? = nil) {
+        self.repeatMode = repeatMode
         self.id = id; self.reminderId = reminderId; self.reminderExternalId = reminderExternalId
         self.thingsId = thingsId; self.mappingId = mappingId; self.fingerprint = fingerprint; self.lastSynced = lastSynced
         self.copySide = copySide; self.copiedCompleted = copiedCompleted
@@ -120,7 +127,17 @@ public struct LinkRecord: Codable, Hashable, Sendable, Identifiable {
         lastSynced = try c.decode(Date.self, forKey: .lastSynced)
         copySide = try c.decodeIfPresent(Side.self, forKey: .copySide)
         copiedCompleted = try c.decodeIfPresent(Bool.self, forKey: .copiedCompleted) ?? false
+        repeatMode = try c.decodeIfPresent(RepeatLinkMode.self, forKey: .repeatMode)
     }
+}
+
+/// What a repeating pair links.
+public enum RepeatLinkMode: String, Codable, Hashable, Sendable {
+    /// A repeating reminder and the Things TEMPLATE; the rule syncs both ways.
+    case template
+    /// A repeating reminder and a plain Things to-do for its current occurrence (the Things side cannot hold the
+    /// rule). Completing either advances the reminder and replaces the to-do.
+    case reminderRepeats
 }
 
 public struct LinkStore: Codable, Hashable, Sendable {

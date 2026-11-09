@@ -107,7 +107,7 @@ public actor RemCTLReminders: RemindersBackend {
     // MARK: Writing
 
     public func create(title: String, notes: String, due: DueDate?, completed: Bool, completionDate: Date?, listId: String,
-                       section: String?) async throws -> ReminderItem {
+                       section: String?, recurrence: RepeatRule?) async throws -> ReminderItem {
         guard let numericList = Int(listId) else { throw RemCTLError.tool("Reminders list not found") }
         var args: [String: JSONValue] = ["title": .string(title), "list_id": .number(Double(numericList))]
         let sectionName = writableSection(section, listId: listId)
@@ -119,6 +119,12 @@ public actor RemCTLReminders: RemindersBackend {
         if let due, let spec = Self.dueSpec(due) {
             args["due"] = .string(spec.due)
             if let alarm = spec.alarm { args["alarm"] = .string(alarm) }
+        }
+        if let recurrence {
+            guard let due, let spec = RemCTLRecurrence.spec(for: recurrence, due: due) else {
+                throw RemCTLError.tool("RemCTL cannot write this repeat rule (it needs a due date and a rule RemCTL can express)")
+            }
+            args["recurrence"] = .string(spec)
         }
         let created = try await transport.callTool("create_reminder", arguments: args)
         guard let id = created["id"]?.int else { throw RemCTLError.tool("RemCTL did not return the new reminder id") }
@@ -152,6 +158,19 @@ public actor RemCTLReminders: RemindersBackend {
             } else {
                 fields["due"] = "clear"
                 fields["alarm"] = "clear"
+            }
+        }
+        if let recurrence = patch.recurrence {
+            if let rule = recurrence {
+                // The due day the rule applies to: the one this patch sets, else the reminder's current one.
+                var dueNow: DueDate?
+                if let due = patch.due { dueNow = due } else { dueNow = try await row(id: numeric).due }
+                guard let spec = RemCTLRecurrence.spec(for: rule, due: dueNow) else {
+                    throw RemCTLError.tool("RemCTL cannot write this repeat rule")
+                }
+                fields["recurrence"] = .string(spec)
+            } else {
+                fields["recurrence"] = "clear"
             }
         }
         if let listId = patch.listId {
@@ -358,6 +377,7 @@ public actor RemCTLReminders: RemindersBackend {
         var completed: Bool
         var completionDate: Date?
         var isRepeating: Bool
+        var recurrence: RepeatRule?
         var isSubtask: Bool
         var deepLink: String?
         var section: String?
@@ -373,6 +393,8 @@ public actor RemCTLReminders: RemindersBackend {
             completed = json["completed"]?.flag ?? false
             completionDate = json["completionDate"]?.string.flatMap(RemCTLReminders.parseLocal)
             isRepeating = json["recurrence"].map { !$0.isNull } ?? false
+            let dueDay = due
+            recurrence = json["recurrence"].flatMap { $0.isNull ? nil : RemCTLRecurrence.rule(from: $0, due: dueDay) }
             isSubtask = json["isSubtask"]?.flag ?? false
             deepLink = json["deepLink"]?.string
             section = json["section"]?.string
@@ -476,15 +498,23 @@ public actor RemCTLReminders: RemindersBackend {
     private static func item(_ row: Row, listId: String, section: String?) -> ReminderItem {
         ReminderItem(id: String(row.id), externalId: row.deepLink, listId: listId, title: row.title, notes: row.notes,
                      due: row.due, completed: row.completed, completionDate: row.completionDate,
-                     lastModified: nil, isRepeating: row.isRepeating, section: section)
+                     lastModified: nil, isRepeating: row.isRepeating, section: section, recurrence: row.recurrence)
     }
 
     static func contentHash(_ item: ReminderItem) -> String {
         let due = item.due.map { "\($0.day)/\($0.minutes.map(String.init) ?? "-")" } ?? "-"
         let completion = item.completionDate.map { String(Int($0.timeIntervalSince1970)) } ?? "-"
         var parts = [item.title, item.notes, due, item.completed ? "1" : "0", completion, item.listId]
+        if let rule = item.recurrence { parts.append("rule:" + stableDescription(rule)) } else if item.isRepeating { parts.append("rule:?") }
         if let section = item.section { parts.append(section) }   // appended only when set, so hashes of unsectioned items are unchanged
         return sha(parts.joined(separator: "\u{1F}"))
+    }
+
+    /// Deterministic text for a rule (Swift's `hashValue` changes on every launch and these hashes are persisted).
+    private static func stableDescription(_ rule: RepeatRule) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return (try? encoder.encode(rule)).map { String(decoding: $0, as: UTF8.self) } ?? "?"
     }
 
     private static func sha(_ string: String) -> String {

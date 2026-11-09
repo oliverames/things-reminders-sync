@@ -89,7 +89,7 @@ enum ThingsChanges {
     /// Full `Task6` create payload with every key the Mac app writes.
     static func taskCreate(title: String, notes: String, type: Int, scheduling: [String: JSONValue],
                            containers: [String: JSONValue], tags: [String], completed: Bool,
-                           completionDate: Date?, now: Date) -> ThingsChange {
+                           completionDate: Date?, now: Date, extra: [String: JSONValue] = [:]) -> ThingsChange {
         let nowTs = now.timeIntervalSince1970
         var sp: Double?
         if completed {
@@ -106,7 +106,22 @@ enum ThingsChanges {
         ]
         p.merge(scheduling) { $1 }
         p.merge(containers) { $1 }
+        p.merge(extra) { $1 }
         return ThingsChange(t: 0, e: ThingsEntity.task, p: p)
+    }
+
+    /// Scheduling keys of a repeating template: `st 2`, `sr` null, `tir` and `icsd` the first occurrence day, `ato`
+    /// the reminder time. Things generates the occurrences itself when `icsd` arrives.
+    static func templateScheduling(_ first: DueDate) throws -> [String: JSONValue] {
+        let ts = try ThingsDates.timestamp(forDay: first.day)
+        var ato: JSONValue = nil
+        if let minutes = first.minutes {
+            guard (0..<1440).contains(minutes) else {
+                throw ThingsCloudError.invalidChange(["reminder minutes \(minutes) is outside 0..<1440"])
+            }
+            ato = .number(Double(minutes * 60))
+        }
+        return ["st": 2, "sb": 0, "sr": nil, "tir": .number(ts), "icsd": .number(ts), "ato": ato]
     }
 
     static func areaCreate(title: String) -> ThingsChange {

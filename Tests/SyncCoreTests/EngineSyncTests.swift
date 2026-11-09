@@ -208,18 +208,24 @@ private func projectWorld() async -> World {
     #expect(try await w.sync().deletionsHeld)
 }
 
-@Test func repeatingItemsAndProjectsAreIgnored() async throws {
+/// Updated for repeating sync: headings and projects are still never synced; a template whose rule is not a known
+/// shape gets no reminder (nothing to copy), and a repeating reminder whose rule is not a known shape gets a PLAIN to-do.
+@Test func headingsProjectsAndUnrecognisedRulesAreNotCopiedAsRepeating() async throws {
     var w = await projectWorld()
-    var rep = todo("t1", "Repeats", project: "P1"); rep.isRepeating = true
+    var rep = todo("t1", "Repeats", project: "P1"); rep.isRepeating = true   // a template with an unrecognised rule
     await w.things.add(rep)
     var heading = ThingsTask(id: "H1", kind: .heading, title: "Heading"); heading.projectId = "P1"
     await w.things.add(heading)
     await w.things.add(ThingsTask(id: "P2", kind: .project, title: "Sub", areaId: nil))
-    var repReminder = reminder("r1", "L1", "Repeating reminder"); repReminder.isRepeating = true
+    var repReminder = reminder("r1", "L1", "Repeating reminder", due: DueDate(day: "2026-11-10")); repReminder.isRepeating = true
     await w.reminders.add(repReminder)
     let r = try await w.sync()
-    #expect(r.changeCount == 0)
-    #expect(w.links.links.isEmpty)
+    #expect(await w.reminders.all(in: "L1").map(\.title) == ["Repeating reminder"])   // no reminder for the template
+    #expect(r.createdInThings == 1)
+    let plain = try #require(await w.things.all().first { $0.title == "Repeating reminder" })
+    #expect(!plain.isRepeating && plain.recurrence == nil && plain.startDate == "2026-11-10")
+    #expect(w.links.links.map(\.repeatMode) == [.reminderRepeats])
+    #expect(r.log.contains { $0.level == .info && $0.message.contains("Things cannot hold") })
 }
 
 @Test func tagModeCreatesInboxTodoWithTag() async throws {

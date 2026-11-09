@@ -139,6 +139,12 @@ extension SyncEngine {
             for link in copies.things {
                 let title = snapshot.tasks[link.thingsId]?.title ?? link.fingerprint.title
                 do {
+                    if snapshot.tasks[link.thingsId]?.isTemplate == true {   // a template copy: its open occurrences go too
+                        for o in snapshot.tasks.values.sorted(by: { $0.id < $1.id }) where o.templateId == link.thingsId && !o.trashed && o.status == .open {
+                            try await things.updateTodo(id: o.id, patch: ThingsTodoPatch(trashed: true))
+                            snapshot.tasks[o.id]?.trashed = true
+                        }
+                    }
                     try await things.updateTodo(id: link.thingsId, patch: ThingsTodoPatch(trashed: true))
                     snapshot.tasks[link.thingsId]?.trashed = true
                     report.thingsTrashed += 1

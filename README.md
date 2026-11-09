@@ -31,7 +31,7 @@ This builds with SwiftPM and assembles `.build/ThingsRemindersSync.app`. Set `SI
 
 ## What is synced
 
-Titles, notes, due dates and times, and completion are synced for the lists you enable. Deletes can be propagated in both directions; in Things, deleted items go to the Trash and are never permanently deleted. Repeating items are not synced. See [docs/SPEC.md](docs/SPEC.md) for the full list of what is and is not synced and how each mapping mode behaves.
+Titles, notes, due dates and times, and completion are synced for the lists you enable. Deletes can be propagated in both directions; in Things, deleted items go to the Trash and are never permanently deleted. Repeating items sync their repeat rule both ways (a repeating reminder pairs with a Things repeating to-do); rules one app cannot express fall back to syncing the current occurrence. See [docs/SPEC.md](docs/SPEC.md) for the full list of what is and is not synced and how each mapping mode behaves.
 
 RemCTL does not report a modification time, so the app records when it first saw each reminder's current content. Conflicting edits on both sides are therefore resolved to the resolution of the Reminders poll interval.
 

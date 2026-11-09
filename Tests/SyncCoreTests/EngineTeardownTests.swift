@@ -188,8 +188,9 @@ actor GatedReminders: RemindersBackend {
         return try await inner.reminders(inLists: ids)
     }
     func create(title: String, notes: String, due: DueDate?, completed: Bool, completionDate: Date?, listId: String,
-                section: String?) async throws -> ReminderItem {
-        try await inner.create(title: title, notes: notes, due: due, completed: completed, completionDate: completionDate, listId: listId, section: section)
+                section: String?, recurrence: RepeatRule?) async throws -> ReminderItem {
+        try await inner.create(title: title, notes: notes, due: due, completed: completed, completionDate: completionDate, listId: listId,
+                               section: section, recurrence: recurrence)
     }
     func update(id: String, patch: ReminderPatch) async throws -> ReminderItem { try await inner.update(id: id, patch: patch) }
     func delete(id: String) async throws { try await inner.delete(id: id) }

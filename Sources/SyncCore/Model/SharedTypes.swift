@@ -50,20 +50,37 @@ public struct ThingsTask: Codable, Hashable, Sendable, Identifiable {
     public var tagIds: [String]
     public var creationDate: Date?
     public var modificationDate: Date?
-    /// Repeating templates and their instances are never synced.
+    /// True for a repeating template (it holds `rr`) and for each occurrence generated from one (`rt`).
     public var isRepeating: Bool
+    /// The template's repeat rule (`rr`), when it is one of the shapes in docs/RECURRENCE.md; nil for
+    /// non-templates and for rules this app does not recognise.
+    public var recurrence: RepeatRule?
+    /// On an occurrence: the id of the template it came from (`rt`).
+    public var templateId: String?
+    /// On a template: next occurrence day (`tir`), next instance-creation day (`icsd`), instances created (`icc`).
+    public var nextDay: String?
+    public var instanceDay: String?
+    public var instancesCreated: Int?
 
     public init(id: String, kind: ThingsTaskKind = .todo, title: String, notes: String = "", status: ThingsStatus = .open,
                 stopDate: Date? = nil, trashed: Bool = false, start: ThingsStart = .anytime, startDate: String? = nil,
                 reminderSeconds: Int? = nil, evening: Bool = false, deadline: String? = nil, projectId: String? = nil,
                 headingId: String? = nil, areaId: String? = nil, tagIds: [String] = [], creationDate: Date? = nil,
-                modificationDate: Date? = nil, isRepeating: Bool = false) {
+                modificationDate: Date? = nil, isRepeating: Bool = false, recurrence: RepeatRule? = nil,
+                templateId: String? = nil, nextDay: String? = nil, instanceDay: String? = nil, instancesCreated: Int? = nil) {
         self.id = id; self.kind = kind; self.title = title; self.notes = notes; self.status = status
         self.stopDate = stopDate; self.trashed = trashed; self.start = start; self.startDate = startDate
         self.reminderSeconds = reminderSeconds; self.evening = evening; self.deadline = deadline
         self.projectId = projectId; self.headingId = headingId; self.areaId = areaId; self.tagIds = tagIds
         self.creationDate = creationDate; self.modificationDate = modificationDate; self.isRepeating = isRepeating
+        self.recurrence = recurrence; self.templateId = templateId; self.nextDay = nextDay
+        self.instanceDay = instanceDay; self.instancesCreated = instancesCreated
     }
+
+    /// A repeating template: it repeats and is not itself an occurrence.
+    public var isTemplate: Bool { isRepeating && templateId == nil }
+    /// An occurrence generated from a template.
+    public var isOccurrence: Bool { templateId != nil }
 }
 
 public struct ThingsArea: Codable, Hashable, Sendable, Identifiable {
@@ -102,18 +119,24 @@ public struct ThingsTodoPatch: Codable, Hashable, Sendable {
     public var addTagIds: [String]?
     public var removeTagIds: [String]?
     public var trashed: Bool?
+    /// Templates only: replaces the repeat rule (`rr`), keeping the template's existing anchors.
+    public var recurrence: RepeatRule?
+    /// Templates only: moves the next occurrence (`tir`, `icsd`) and sets the reminder time (`ato`).
+    public var templateNext: DueDate?
 
     public init(title: String? = nil, notes: String? = nil, when: DueDate?? = nil, completed: Bool? = nil,
                 completionDate: Date? = nil, placement: ThingsPlacement? = nil, addTagIds: [String]? = nil,
-                removeTagIds: [String]? = nil, trashed: Bool? = nil) {
+                removeTagIds: [String]? = nil, trashed: Bool? = nil, recurrence: RepeatRule? = nil,
+                templateNext: DueDate? = nil) {
         self.title = title; self.notes = notes; self.when = when; self.completed = completed
         self.completionDate = completionDate; self.placement = placement; self.addTagIds = addTagIds
-        self.removeTagIds = removeTagIds; self.trashed = trashed
+        self.removeTagIds = removeTagIds; self.trashed = trashed; self.recurrence = recurrence
+        self.templateNext = templateNext
     }
 
     public var isEmpty: Bool {
         title == nil && notes == nil && when == nil && completed == nil && placement == nil
-            && addTagIds == nil && removeTagIds == nil && trashed == nil
+            && addTagIds == nil && removeTagIds == nil && trashed == nil && recurrence == nil && templateNext == nil
     }
 }
 
@@ -125,11 +148,15 @@ public struct ThingsTodoDraft: Codable, Hashable, Sendable {
     public var completionDate: Date?
     public var placement: ThingsPlacement
     public var tagIds: [String]
+    /// When set, a repeating TEMPLATE is created (never an occurrence): `when` is the first occurrence.
+    public var recurrence: RepeatRule?
 
     public init(title: String, notes: String = "", when: DueDate? = nil, completed: Bool = false,
-                completionDate: Date? = nil, placement: ThingsPlacement = .inbox, tagIds: [String] = []) {
+                completionDate: Date? = nil, placement: ThingsPlacement = .inbox, tagIds: [String] = [],
+                recurrence: RepeatRule? = nil) {
         self.title = title; self.notes = notes; self.when = when; self.completed = completed
         self.completionDate = completionDate; self.placement = placement; self.tagIds = tagIds
+        self.recurrence = recurrence
     }
 }
 
@@ -206,11 +233,16 @@ public struct ReminderItem: Codable, Hashable, Sendable, Identifiable {
     public var completionDate: Date?
     public var lastModified: Date?
     public var isRepeating: Bool
+    /// The repeat rule when RemCTL's export object is one this app can represent; nil for other rules
+    /// (then `isRepeating` is still true).
+    public var recurrence: RepeatRule?
     /// The Reminders section the item sits in, if any.
     public var section: String?
     public init(id: String, externalId: String? = nil, listId: String, title: String, notes: String = "",
                 due: DueDate? = nil, completed: Bool = false, completionDate: Date? = nil,
-                lastModified: Date? = nil, isRepeating: Bool = false, section: String? = nil) {
+                lastModified: Date? = nil, isRepeating: Bool = false, section: String? = nil,
+                recurrence: RepeatRule? = nil) {
+        self.recurrence = recurrence
         self.id = id; self.externalId = externalId; self.listId = listId; self.title = title; self.notes = notes
         self.due = due; self.completed = completed; self.completionDate = completionDate
         self.lastModified = lastModified; self.isRepeating = isRepeating; self.section = section
@@ -228,12 +260,16 @@ public struct ReminderPatch: Codable, Hashable, Sendable {
     /// `.some(name)` assigns the section (creating it when missing); `.some(nil)` asks to remove the
     /// reminder from its section (RemCTL 2.5.0 cannot; see docs/SPEC.md). Applied after any list move.
     public var section: String??
+    /// `.some(rule)` sets the repeat rule; `.some(nil)` removes the repeat (`remctl edit --recurrence clear`).
+    public var recurrence: RepeatRule??
     public init(title: String? = nil, notes: String? = nil, due: DueDate?? = nil, completed: Bool? = nil,
-                completionDate: Date? = nil, listId: String? = nil, section: String?? = nil) {
+                completionDate: Date? = nil, listId: String? = nil, section: String?? = nil, recurrence: RepeatRule?? = nil) {
         self.title = title; self.notes = notes; self.due = due; self.completed = completed
-        self.completionDate = completionDate; self.listId = listId; self.section = section
+        self.completionDate = completionDate; self.listId = listId; self.section = section; self.recurrence = recurrence
     }
-    public var isEmpty: Bool { title == nil && notes == nil && due == nil && completed == nil && listId == nil && section == nil }
+    public var isEmpty: Bool {
+        title == nil && notes == nil && due == nil && completed == nil && listId == nil && section == nil && recurrence == nil
+    }
 }
 
 public enum RemindersAccess: String, Codable, Sendable { case notDetermined, granted, denied }
@@ -246,7 +282,7 @@ public protocol RemindersBackend: Sendable {
     /// All reminders (open and completed) in the given lists.
     func reminders(inLists listIds: [String]) async throws -> [ReminderItem]
     func create(title: String, notes: String, due: DueDate?, completed: Bool, completionDate: Date?, listId: String,
-                section: String?) async throws -> ReminderItem
+                section: String?, recurrence: RepeatRule?) async throws -> ReminderItem
     func update(id: String, patch: ReminderPatch) async throws -> ReminderItem
     /// Removes the reminder. Missing ids are not an error.
     func delete(id: String) async throws
@@ -267,6 +303,11 @@ public struct CreatedReminderSection: Hashable, Sendable {
 }
 
 extension RemindersBackend {
+    public func create(title: String, notes: String, due: DueDate?, completed: Bool, completionDate: Date?, listId: String,
+                       section: String?) async throws -> ReminderItem {
+        try await create(title: title, notes: notes, due: due, completed: completed, completionDate: completionDate,
+                         listId: listId, section: section, recurrence: nil)
+    }
     public func takeCreatedSections() async -> [CreatedReminderSection] { [] }
     public func deleteSection(name: String, listId: String) async throws {}
 }

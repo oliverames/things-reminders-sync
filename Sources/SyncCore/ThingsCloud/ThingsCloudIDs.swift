@@ -95,7 +95,7 @@ typealias ThingsChangeMap = [String: ThingsChange]
 enum ThingsChangeValidator {
     static let idListKeys = ["pr", "agr", "ar", "tg", "ts", "rt", "dl", "pn"]
     static let timestampKeys = ["cd", "md", "sp", "lai"]
-    static let calendarDateKeys = ["sr", "tir", "dd"]
+    static let calendarDateKeys = ["sr", "tir", "dd", "icsd"]
     /// 2100-01-01; anything later is milliseconds or garbage.
     static let latestTimestamp = 4_102_444_800.0
 
@@ -121,6 +121,12 @@ enum ThingsChangeValidator {
                         continue
                     }
                 }
+            }
+            if change.e.hasPrefix("Task") {
+                if let rr = change.p["rr"], !rr.isNull {
+                    problems += ThingsRepeat.problems(in: rr).map { "\(id): rr \($0)" }
+                }
+                if let icc = change.p["icc"], !icc.isNull, (icc.int ?? -1) < 0 { problems.append("\(id): icc must be an integer >= 0") }
             }
             for key in timestampKeys + calendarDateKeys {
                 guard let value = change.p[key], !value.isNull else { continue }

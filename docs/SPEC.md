@@ -38,7 +38,7 @@ Capability Host authorized for Reminders; the app needs no Reminders permission 
   Subtasks are skipped. Ids are RemCTL's numeric ids as strings.
 - Due dates: `dueDate` plus `allDay` map to `DueDate` (the time part is ignored when all-day). A timed due
   is written with an `alarm` at the same instant (mirroring the Things reminder); clearing a due also
-  clears the alarm. Any `recurrence` means repeating (not synced). Completion uses `set_completion`,
+  clears the alarm. Any `recurrence` means repeating (see "Repeating items"). Completion uses `set_completion`,
   omitting `completion_date` for repeating reminders.
 - Sections: `remctl export --json` rows carry no `section` (checked against RemCTL 2.5.0); `get_reminder` and
   `remctl show --list-id N --completed --json` do. So for the lists registered with
@@ -108,8 +108,8 @@ A Things item that matches several mappings belongs to the first one in `config.
 mappings are tried before every other mode, so a to-do under a mapped heading is never also claimed by a project
 mapping of the same project, wherever that mapping is listed. Several lists may map to different headings of one project.
 A heading target exists while it is a non-trashed task of kind heading. Sections are ignored in heading mode.
-Only to-dos sync: never projects, headings, checklist items, or repeating to-dos (`isRepeating`
-either side). Things items that are trashed are out of scope except as deletions of linked pairs.
+Only to-dos sync: never projects, headings or checklist items. Repeating items sync as rules (see
+"Repeating items"). Things items that are trashed are out of scope except as deletions of linked pairs.
 
 ## Field mapping
 
@@ -155,6 +155,24 @@ was written in the same commit as `Task7`, with `md` set on create (so `md` on c
 
 Fingerprints are seeded from a re-read of the written item, and a skipped or failed write keeps the
 previous fingerprints (lessons from Remindian issues #74, #75 and #99).
+
+### Repeating items
+
+A repeating reminder pairs with a Things repeat TEMPLATE (`repeatMode` `.template`); the rule syncs
+both ways and the app never creates an occurrence (Things generates them from `icsd`). Shapes and the
+validator are in docs/RECURRENCE.md; code in `Engine/RepeatSync.swift`.
+
+- Completing the occurrence in Things completes the reminder without a date, so it advances itself.
+  A reminder whose due moves to the rule's next occurrence (same time of day) is an advance: the open
+  occurrence for the old day is completed. Any other due change is a reschedule.
+- Rule edits copy the changed side's rule; both changed means the later edit wins. A counted end
+  (`rc`/`count`) is masked when comparing, because Reminders decrements it on each completion.
+- Fallback A (a Things rule Reminders cannot hold, such as after completion): the template gets no
+  reminder and its occurrences sync as plain pairs. Fallback B (a Reminders rule with no verified
+  Things shape): Things gets a plain to-do for the current occurrence, replaced when the reminder
+  advances (`repeatMode` `.reminderRepeats`).
+- A template that stops repeating clears the reminder's rule; a reminder that stops repeating unlinks
+  the pair. Deleting the reminder trashes the template and its open occurrences.
 
 ### Sections and headings
 

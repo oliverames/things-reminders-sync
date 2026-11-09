@@ -4,6 +4,7 @@
 //
 //   THINGS_EMAIL=... THINGS_PASSWORD=... trs-admin remove-completed-copies
 //   THINGS_EMAIL=... THINGS_PASSWORD=... trs-admin teardown <listId> [--remove-copies] [--remove-mapping]
+//   THINGS_EMAIL=... THINGS_PASSWORD=... trs-admin dry-run   (one full pass; prints the writes it would make, saves nothing)
 import Foundation
 import SyncCore
 
@@ -13,7 +14,7 @@ func fail(_ message: String) -> Never {
 }
 
 let args = Array(CommandLine.arguments.dropFirst())
-guard let command = args.first else { fail("usage: trs-admin remove-completed-copies | teardown <listId> [--remove-copies] [--remove-mapping]") }
+guard let command = args.first else { fail("usage: trs-admin remove-completed-copies | teardown <listId> [--remove-copies] [--remove-mapping] | dry-run") }
 let env = ProcessInfo.processInfo.environment
 guard let email = env["THINGS_EMAIL"], let password = env["THINGS_PASSWORD"] else { fail("Set THINGS_EMAIL and THINGS_PASSWORD.") }
 
@@ -24,6 +25,12 @@ guard links.ledgerBackfilled else { fail("The ledger has not been backfilled yet
 let remindersPath = config.remctlPath
 let engine = SyncEngine(things: ThingsCloudClient(email: email, password: password),
                         reminders: RemCTLReminders(executablePath: remindersPath))
+
+if command == "dry-run" {
+    try await runDryRun(config: config, links: links, things: ThingsCloudClient(email: email, password: password),
+                        reminders: RemCTLReminders(executablePath: remindersPath))
+    exit(0)
+}
 
 let report: TeardownReport
 switch command {

@@ -6,6 +6,8 @@ struct ThingsDatabase: Sendable {
         var task: ThingsTask
         var hasRule = false
         var hasTemplates = false
+        /// The raw `rr` of a template, kept so a rule rewrite can preserve its anchors.
+        var rawRule: JSONValue?
     }
 
     var tasks: [String: Row] = [:]
@@ -71,8 +73,18 @@ struct ThingsDatabase: Sendable {
         if let v = p["cd"] { row.task.creationDate = date(v) }
         if let v = p["md"] { row.task.modificationDate = date(v) }
         if let v = p["sp"] { row.task.stopDate = date(v) }
-        if let v = p["rr"] { row.hasRule = !v.isNull }
-        if let v = p["rt"] { row.hasTemplates = !(v.array ?? []).isEmpty }
+        if let v = p["rr"] {
+            row.hasRule = !v.isNull
+            row.rawRule = v.isNull ? nil : v
+            row.task.recurrence = v.isNull ? nil : ThingsRepeat.rule(from: v)
+        }
+        if let v = p["rt"] {
+            row.hasTemplates = !(v.array ?? []).isEmpty
+            row.task.templateId = firstId(v)
+        }
+        if let v = p["tir"] { row.task.nextDay = day(v) }
+        if let v = p["icsd"] { row.task.instanceDay = day(v) }
+        if let v = p["icc"] { row.task.instancesCreated = v.int }
         row.task.isRepeating = row.hasRule || row.hasTemplates
     }
 

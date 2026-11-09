@@ -28,6 +28,20 @@ actor FakeThings: ThingsBackend {
         created.append(d)
         let id = nextId("T")
         var t = ThingsTask(id: id, title: d.title, notes: d.notes, tagIds: d.tagIds, modificationDate: Date())
+        if let rule = d.recurrence {
+            // A template: never an occurrence. `tir` and `icsd` are the first occurrence day.
+            t.isRepeating = true; t.recurrence = rule; t.start = .someday
+            t.nextDay = d.when?.day; t.instanceDay = d.when?.day; t.instancesCreated = 0
+            t.reminderSeconds = d.when?.reminderSeconds
+            switch d.placement {
+            case .inbox: break
+            case .project(let p): t.projectId = p
+            case .area(let a): t.areaId = a
+            case .heading(let h): t.headingId = h
+            }
+            tasks[id] = t
+            return id
+        }
         switch d.placement {
         case .inbox: t.start = .inbox
         case .project(let p): t.projectId = p
@@ -62,6 +76,8 @@ actor FakeThings: ThingsBackend {
         if let add = p.addTagIds { t.tagIds += add }
         if let rem = p.removeTagIds { t.tagIds.removeAll { rem.contains($0) } }
         if let tr = p.trashed { t.trashed = tr }
+        if let rule = p.recurrence { t.recurrence = rule }
+        if let next = p.templateNext { t.nextDay = next.day; t.instanceDay = next.day; t.reminderSeconds = next.reminderSeconds }
         t.modificationDate = Date()
         tasks[id] = t
     }
@@ -97,6 +113,10 @@ actor FakeReminders: RemindersBackend {
     var items: [String: ReminderItem] = [:]
     private var counter = 0
     private(set) var deletes: [String] = []
+    private(set) var created: [(title: String, due: DueDate?, rule: RepeatRule)] = []
+    private(set) var recurrenceWrites: [(id: String, rule: RepeatRule?)] = []
+    /// Every completion request on a repeating reminder: the id and the completion date it was (wrongly) given.
+    private(set) var completions: [(id: String, date: Date?)] = []
     /// Like RemCTL 2.5.0, a section cannot be removed: `.some(nil)` is a no-op.
     var clearsSections = false
     var groceryLists: Set<String> = []
@@ -131,13 +151,14 @@ actor FakeReminders: RemindersBackend {
     func reminders(inLists ids: [String]) async throws -> [ReminderItem] { items.values.filter { ids.contains($0.listId) } }
 
     func create(title: String, notes: String, due: DueDate?, completed: Bool, completionDate: Date?, listId: String,
-                section: String?) async throws -> ReminderItem {
+                section: String?, recurrence: RepeatRule?) async throws -> ReminderItem {
         counter += 1
         if section != nil { sectionWrites.append(("new", section!)) }
         if let section, !groceryLists.contains(listId) { noteSection(listId, section) }
         let r = ReminderItem(id: "R\(counter)", externalId: "X\(counter)", listId: listId, title: title, notes: notes, due: due,
                              completed: completed, completionDate: completed ? (completionDate ?? Date()) : nil, lastModified: Date(),
-                             section: groceryLists.contains(listId) ? nil : section)
+                             isRepeating: recurrence != nil, section: groceryLists.contains(listId) ? nil : section, recurrence: recurrence)
+        if let recurrence { created.append((title, due, recurrence)) }
         items[r.id] = r
         return r
     }
@@ -147,7 +168,19 @@ actor FakeReminders: RemindersBackend {
         if let v = p.title { r.title = v }
         if let v = p.notes { r.notes = v }
         if let d = p.due { r.due = d }
-        if let c = p.completed { r.completed = c; r.completionDate = c ? (p.completionDate ?? Date()) : nil }
+        if let rec = p.recurrence { r.recurrence = rec; r.isRepeating = rec != nil; recurrenceWrites.append((id, rec)) }
+        if let c = p.completed {
+            if c, r.isRepeating {
+                // Like RemCTL: a repeating reminder advances to its next occurrence (same id) instead of completing.
+                completions.append((id, p.completionDate))
+                if let day = r.due?.day, let next = r.recurrence?.nextOccurrence(after: day) { r.due = DueDate(day: next, minutes: r.due?.minutes) }
+                else if r.recurrence == nil, let day = r.due?.day, let d = RepeatCalendar.date(day) {
+                    // An unrecognised rule still advances (a week, here).
+                    r.due = DueDate(day: RepeatCalendar.string(RepeatCalendar.add(days: 7, to: d)), minutes: r.due?.minutes)
+                } else { r.completed = true; r.completionDate = Date() }
+                if let n = r.recurrence, case .afterCount(let k) = n.end { r.recurrence?.end = .afterCount(max(k - 1, 1)) }
+            } else { r.completed = c; r.completionDate = c ? (p.completionDate ?? Date()) : nil }
+        }
         if let l = p.listId { r.listId = l; r.section = nil }   // sections belong to a list
         if let sec = p.section, !groceryLists.contains(r.listId) {
             if let name = sec { r.section = name; sectionWrites.append((id, name)); noteSection(r.listId, name) }

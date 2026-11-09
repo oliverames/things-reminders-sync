@@ -140,6 +140,19 @@ public actor ThingsCloudClient: ThingsBackend {
     public func createTodo(_ draft: ThingsTodoDraft) async throws -> String {
         try await withLock {
             let id = ThingsID.generate()
+            if let rule = draft.recurrence {
+                // A repeating TEMPLATE only. Things generates the occurrences itself.
+                guard let first = draft.when else { throw ThingsCloudError.invalidChange(["a repeating template needs a first occurrence day"]) }
+                guard let rr = ThingsRepeat.rr(for: rule, start: first.day) else {
+                    throw ThingsCloudError.invalidChange(["the repeat rule has no verified Things shape"])
+                }
+                let change = ThingsChanges.taskCreate(
+                    title: draft.title, notes: draft.notes, type: 0, scheduling: try ThingsChanges.templateScheduling(first),
+                    containers: ThingsChanges.containers(draft.placement), tags: draft.tagIds,
+                    completed: false, completionDate: nil, now: now(), extra: ["rr": rr, "icc": 0])
+                try await commit([id: change])
+                return id
+            }
             let scheduling: [String: JSONValue]
             if draft.when == nil, case .inbox = draft.placement {
                 scheduling = ThingsChanges.inboxScheduling
@@ -190,6 +203,25 @@ public actor ThingsCloudClient: ThingsBackend {
                 if tags != current.tagIds { p["tg"] = ThingsChanges.idArray(tags) }
             }
             if let trashed = patch.trashed { p["tr"] = .bool(trashed) }
+            if patch.recurrence != nil || patch.templateNext != nil {
+                guard let row = database?.tasks[id], row.hasRule else {
+                    throw ThingsCloudError.invalidChange(["to-do \(id) is not a repeating template"])
+                }
+                if let rule = patch.recurrence {
+                    let o = row.rawRule?.object
+                    var anchors: (ia: Double, sr: Double)?
+                    if o?["tp"]?.int == 0, let ia = o?["ia"]?.double, let sr = o?["sr"]?.double { anchors = (ia, sr) }
+                    let start = row.task.nextDay ?? current.startDate ?? today()
+                    guard let rr = ThingsRepeat.rr(for: rule, start: start, anchors: anchors) else {
+                        throw ThingsCloudError.invalidChange(["the repeat rule has no verified Things shape"])
+                    }
+                    p["rr"] = rr
+                }
+                if let next = patch.templateNext {
+                    let scheduling = try ThingsChanges.templateScheduling(next)
+                    p["tir"] = scheduling["tir"]; p["icsd"] = scheduling["icsd"]; p["ato"] = scheduling["ato"]
+                }
+            }
             try await commit([id: ThingsChange(t: 1, e: ThingsEntity.task, p: p)])
         }
     }

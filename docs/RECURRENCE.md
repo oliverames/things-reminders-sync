@@ -75,3 +75,18 @@ All samples had due 2026-11-10 (all-day).
   repeat; Reminders itself has no after-completion repeat. End conditions and yearly nth-weekday
   rules were not sampled from RemCTL.
 - Completing a repeating reminder advances the same reminder (same id) to its next occurrence.
+
+## RemCTL write forms and live findings (2026-11-09, RemCTL 2.5.0)
+
+- `--recurrence` (CLI) and `recurrence` (MCP `create_reminder` / `update_reminder`) accept the grammar above AND a
+  JSON object in the export shape (`frequency`, `interval`, `daysOfWeek` EventKit 1-7, `daysOfWeekDetailed`,
+  `daysOfMonth`, `monthsOfYear`, `count`, `endDate`). The object form writes what the grammar cannot: `{"daysOfMonth":[-1],...}`
+  (last day of month), `"endDate":"2026-12-31"` (exports as `"endDate":"2026-12-31T00:00:00"`), `"count":5`
+  (exports as `"count":5`), and yearly nth weekday (`daysOfWeekDetailed` + `monthsOfYear` [11]).
+  `monthly 5th-fri` and `monthly -1-fri` also work. Unknown keys make the whole value unparseable.
+- `count` is the number of occurrences REMAINING: every completion advances the due date and decrements it (5 to 4 to 3).
+  The app therefore compares rules with the count masked (`RepeatRule.key`).
+- `edit --recurrence clear` (or `none`) removes the repeat; setting a plain rule drops a previous end condition.
+  The MCP `update_reminder` accepts `"recurrence": "clear"` too.
+- `weekly` / `yearly` without days take the weekday / date from the due date; the app always writes weekdays explicitly
+  and only writes a bare `yearly` when the due date is the rule's date.
