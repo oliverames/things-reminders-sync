@@ -1,0 +1,119 @@
+import Foundation
+
+enum ThingsEntity {
+    static let task = "Task6"
+    static let area = "Area3"
+    static let tag = "Tag4"
+}
+
+// MARK: - Calendar days
+
+enum ThingsDates {
+    private static func calendar(_ zone: TimeZone) -> Calendar {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = zone
+        return cal
+    }
+
+    /// `YYYY-MM-DD` -> unix seconds at midnight UTC (the form Things stores for `sr`, `tir`, `dd`).
+    static func timestamp(forDay day: String) throws -> Double {
+        let parts = day.split(separator: "-", omittingEmptySubsequences: false)
+        guard parts.count == 3, parts[0].count == 4, parts[1].count == 2, parts[2].count == 2,
+              let y = Int(parts[0]), let m = Int(parts[1]), let d = Int(parts[2]) else {
+            throw ThingsCloudError.invalidChange(["invalid date \"\(day)\", use YYYY-MM-DD"])
+        }
+        let cal = calendar(TimeZone(identifier: "UTC")!)
+        guard let date = cal.date(from: DateComponents(year: y, month: m, day: d)),
+              cal.dateComponents([.year, .month, .day], from: date) == DateComponents(year: y, month: m, day: d) else {
+            throw ThingsCloudError.invalidChange(["invalid date \"\(day)\""])
+        }
+        return date.timeIntervalSince1970
+    }
+
+    /// Unix seconds -> `YYYY-MM-DD` in UTC.
+    static func day(fromTimestamp ts: Double) -> String {
+        format(Date(timeIntervalSince1970: ts), in: TimeZone(identifier: "UTC")!)
+    }
+
+    static func today(in zone: TimeZone, now: Date) -> String { format(now, in: zone) }
+
+    private static func format(_ date: Date, in zone: TimeZone) -> String {
+        let c = calendar(zone).dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+    }
+}
+
+// MARK: - Change builders (the wire format lives here and only here)
+
+enum ThingsChanges {
+    static func noteObject(_ text: String) -> JSONValue {
+        .object(["_t": "tx", "t": 1, "ch": .number(text.isEmpty ? 0 : Double(ThingsCRC32.checksum(text))), "v": .string(text)])
+    }
+
+    static let emptyXX: JSONValue = .object(["sn": .object([:]), "_t": "oo"])
+
+    static func idArray(_ ids: [String]) -> JSONValue { .array(ids.map { .string($0) }) }
+
+    static func number(_ d: Double?) -> JSONValue { d.map { .number($0) } ?? .null }
+
+    /// Scheduling fields for a "When". `nil` is Anytime. A day today or earlier is `st 1`, a later day is
+    /// `st 2`; `sr` and `tir` carry the day, `ato` the reminder (minutes * 60) or null.
+    static func scheduling(_ when: DueDate?, today: String) throws -> [String: JSONValue] {
+        guard let when else {
+            return ["st": 1, "sb": 0, "sr": nil, "tir": nil, "ato": nil]
+        }
+        let ts = try ThingsDates.timestamp(forDay: when.day)
+        var ato: JSONValue = nil
+        if let minutes = when.minutes {
+            guard (0..<1440).contains(minutes) else {
+                throw ThingsCloudError.invalidChange(["reminder minutes \(minutes) is outside 0..<1440"])
+            }
+            ato = .number(Double(minutes * 60))
+        }
+        return ["st": .number(when.day > today ? 2 : 1), "sb": 0, "sr": .number(ts), "tir": .number(ts), "ato": ato]
+    }
+
+    static let inboxScheduling: [String: JSONValue] = ["st": 0, "sb": 0, "sr": nil, "tir": nil, "ato": nil]
+
+    /// Container keys for a placement. A to-do in a project carries no area.
+    static func containers(_ placement: ThingsPlacement) -> [String: JSONValue] {
+        switch placement {
+        case .inbox: return ["pr": [], "agr": [], "ar": []]
+        case let .project(id): return ["pr": idArray([id]), "agr": [], "ar": []]
+        case let .area(id): return ["pr": [], "agr": [], "ar": idArray([id])]
+        }
+    }
+
+    /// Full `Task6` create payload with every key the Mac app writes.
+    static func taskCreate(title: String, notes: String, type: Int, scheduling: [String: JSONValue],
+                           containers: [String: JSONValue], tags: [String], completed: Bool,
+                           completionDate: Date?, now: Date) -> ThingsChange {
+        let nowTs = now.timeIntervalSince1970
+        var sp: Double?
+        if completed {
+            sp = nowTs
+            if let completionDate, completionDate.timeIntervalSince1970 <= nowTs { sp = completionDate.timeIntervalSince1970 }
+        }
+        var p: [String: JSONValue] = [
+            "tt": .string(title), "nt": noteObject(notes), "tp": .number(Double(type)),
+            "ss": completed ? 3 : 0, "sp": number(sp), "tr": false,
+            "dd": nil, "tg": idArray(tags), "ix": 0, "ti": 0, "cd": .number(nowTs), "md": .number(nowTs),
+            // Defaults Things writes on every new task.
+            "dds": nil, "rt": [], "rmd": nil, "dl": [], "icp": false, "do": 0, "lai": nil, "lt": false,
+            "icc": 0, "icsd": nil, "rp": nil, "acrd": nil, "rr": nil, "xx": emptyXX,
+        ]
+        p.merge(scheduling) { $1 }
+        p.merge(containers) { $1 }
+        return ThingsChange(t: 0, e: ThingsEntity.task, p: p)
+    }
+
+    static func areaCreate(title: String) -> ThingsChange {
+        ThingsChange(t: 0, e: ThingsEntity.area, p: ["tt": .string(title), "tg": [], "ix": 0, "xx": emptyXX])
+    }
+
+    static func tagCreate(title: String, parentId: String?) -> ThingsChange {
+        ThingsChange(t: 0, e: ThingsEntity.tag, p: [
+            "tt": .string(title), "sh": nil, "pn": idArray(parentId.map { [$0] } ?? []), "ix": 0, "xx": emptyXX,
+        ])
+    }
+}
