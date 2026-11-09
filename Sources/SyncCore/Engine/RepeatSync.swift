@@ -98,6 +98,10 @@ extension SyncPass {
                         // Completing in Reminders advanced the same reminder: finish the occurrence for the old day.
                         if let o = occurrences.first(where: { $0.startDate == base.day }) {
                             plan.occurrenceWrites.append((o.id, ThingsTodoPatch(completed: true)))
+                        } else if occurrences.isEmpty, let rDue {
+                            // No occurrence to finish (Things has not generated one yet): move the template's next
+                            // day, or the next pass reads the old `tir` as a Things-side change and reverts the reminder.
+                            plan.thingsPatch.templateNext = rDue
                         }
                     } else if let rDue {
                         // A reschedule: move the open occurrence, or the template's next day when there is none.

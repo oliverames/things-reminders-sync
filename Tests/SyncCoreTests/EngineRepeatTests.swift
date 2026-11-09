@@ -165,6 +165,21 @@ struct EngineRepeatTests {
         #expect(writes.count == 1 && writes[0].1.templateNext == DueDate(day: "2026-11-18", minutes: 600))
     }
 
+    /// Found live on 2026-11-09: a reminder moved to the rule's next day while Things had no occurrence yet was read as
+    /// an advance, nothing moved in Things, and the next pass reverted the reminder to the template's old next day.
+    @Test func advanceWithNoOccurrenceYetMovesTheTemplateAndStays() async throws {
+        var w = await world()
+        await w.things.add(template(seconds: 32400))
+        try await w.sync()
+        let rid = w.links.links[0].reminderId
+        await w.reminders.edit(rid) { $0.due = DueDate(day: "2026-11-23", minutes: 540) }   // the next Monday, same time
+        try await w.sync()
+        #expect(await w.things.task("TPL")?.nextDay == "2026-11-23")
+        await w.things.clearRecords()
+        #expect(try await w.sync().changeCount == 0, "the reminder must not be moved back")
+        #expect(await w.reminders.item(rid)?.due?.day == "2026-11-23")
+    }
+
     @Test func reschedulingTheOccurrenceInThingsMovesTheReminder() async throws {
         var w = try await pairedWorld()
         await w.things.edit("OCC1") { $0.startDate = "2026-11-18"; $0.modificationDate = Date() }
