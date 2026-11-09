@@ -8,10 +8,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG="${1:-debug}"
 APP_NAME="ThingsRemindersSync"
-BUNDLE_ID="com.oliverames.ThingsRemindersSync"
+BUNDLE_ID="${BUNDLE_ID:-com.oliverames.ThingsRemindersSync}"
 VERSION="0.1.0"
 BUILD_NUMBER="1"
-IDENTITY="Developer ID Application: Oliver Ames (PV3W52NDZ3)"
+# Set SIGN_IDENTITY to your own "Developer ID Application: ..." identity; without one the app is signed ad hoc.
+IDENTITY="${SIGN_IDENTITY:-Developer ID Application: Oliver Ames (PV3W52NDZ3)}"
 APP_DIR="$ROOT/.build/$APP_NAME.app"
 
 echo "Building ($CONFIG)..."
@@ -31,7 +32,7 @@ sed -e "s/__BUNDLE_ID__/$BUNDLE_ID/" -e "s/__VERSION__/$VERSION/" -e "s/__BUILD_
   "$ROOT/Resources/Info.plist" > "$APP_DIR/Contents/Info.plist"
 plutil -lint "$APP_DIR/Contents/Info.plist"
 
-# Icon: render an iconset from an SF Symbol, then convert. Skipped (with a warning) if it fails.
+# Icon: draw an iconset with scripts/make-icon.swift, then convert. Skipped (with a warning) if it fails.
 ICON_TMP="$(mktemp -d)"
 if swift "$ROOT/scripts/make-icon.swift" "$ICON_TMP/AppIcon.iconset" \
    && iconutil -c icns "$ICON_TMP/AppIcon.iconset" -o "$APP_DIR/Contents/Resources/AppIcon.icns"; then

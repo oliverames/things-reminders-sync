@@ -15,7 +15,7 @@ A menu bar app for macOS that keeps Apple Reminders lists in two-way sync with T
 scripts/build-app.sh release
 ```
 
-This builds with SwiftPM and assembles `.build/ThingsRemindersSync.app`. The script signs with the Developer ID identity `Developer ID Application: Oliver Ames (PV3W52NDZ3)` using the hardened runtime. If that identity is missing it falls back to ad-hoc signing with a warning. Run `scripts/build-app.sh` with no argument for a debug build.
+This builds with SwiftPM and assembles `.build/ThingsRemindersSync.app`. Set `SIGN_IDENTITY` to your own `Developer ID Application: ...` identity to sign with the hardened runtime, and `BUNDLE_ID` to use your own bundle identifier; without an identity the script signs ad hoc with a warning. Run `scripts/build-app.sh` with no argument for a debug build.
 
 ## Install
 
@@ -36,3 +36,15 @@ Titles, notes, due dates and times, and completion are synced for the lists you 
 RemCTL does not report a modification time, so the app records when it first saw each reminder's current content. Conflicting edits on both sides are therefore resolved to the resolution of the Reminders poll interval.
 
 Your Things Cloud password is stored in the macOS Keychain.
+
+## Disclaimer
+
+This project is not affiliated with or endorsed by Cultured Code or Apple. Things Cloud has no public API: the app uses the same undocumented sync protocol the Things apps use, which can change without notice. A malformed write can make the Things apps fail to sync or crash, so the app validates every change before it commits (see [docs/SPEC.md](docs/SPEC.md)) and only writes record shapes that were observed from the real apps ([docs/RECURRENCE.md](docs/RECURRENCE.md)). Back up your Things data before you first turn on a list, and try it on a test list first.
+
+## Contributing
+
+Forks and pull requests are welcome. `swift test` runs the unit tests, which use fakes and never touch the network, the Keychain, or real reminders. Before adding a new Things Cloud field, record the exact shape the Things app writes for it and add it to the docs alongside the code.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

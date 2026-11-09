@@ -2,8 +2,8 @@
 
 A self-contained macOS menu bar app that keeps chosen Apple Reminders lists and Things 3 in two-way
 sync. No third-party Swift dependencies and no server: one `.app` built from this SwiftPM package,
-which reads and writes Reminders through the separately installed RemCTL CLI. Owner: Oliver Ames. Runs on his always-on Mac (home-server, macOS 27) or his
-MacBook Pro.
+which reads and writes Reminders through the separately installed RemCTL CLI. Designed to run on an
+always-on Mac.
 
 ## Change detection
 
@@ -246,7 +246,7 @@ Cleanup, always limited to ledger entries and never to a container a mapping sti
 | `Tests/SyncCoreTests/` | each agent its own files | `ThingsCloud*Tests.swift`, `Engine*Tests.swift` |
 
 Tests use Swift Testing (`import Testing`). Unit tests never touch the network, the real Keychain,
-or real Reminders. No test fixtures may contain Oliver's real task data.
+or real Reminders. No test fixtures may contain anyone's real task data.
 
 ## Moving items (reference)
 
