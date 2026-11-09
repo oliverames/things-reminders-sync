@@ -124,6 +124,7 @@ private final class SyncPass {
             if let e = r.externalId { remindersByExternal[e] = r }
         }
         buildActiveMappings(lists: lists)
+        await migrateRetargetedMappings()
         buildThingsScope()
 
         let linksAtStart = store.links
@@ -148,7 +149,7 @@ private final class SyncPass {
     // MARK: Targets and mappings
 
     func ensureTargets() async {
-        for i in config.mappings.indices where config.mappings[i].enabled && config.mappings[i].targetId == nil {
+        for i in config.mappings.indices where config.mappings[i].enabled && config.mappings[i].targetId == nil && !config.mappings[i].awaitingTarget {
             let m = config.mappings[i]
             do {
                 let id: String
@@ -168,6 +169,10 @@ private final class SyncPass {
     func buildActiveMappings(lists: [ReminderList]) {
         let listsById = Dictionary(uniqueKeysWithValues: lists.map { ($0.id, $0) })
         for m in config.mappings where m.enabled {
+            if m.awaitingTarget {
+                log(.info, "\"\(m.listTitle)\" is paused until you choose a Things \(m.mode.rawValue) in Settings")
+                continue
+            }
             guard let list = listsById[m.id] else {
                 log(.warning, "Reminders list \"\(m.listTitle)\" is not available; skipped")
                 continue
@@ -194,6 +199,70 @@ private final class SyncPass {
     }
 
     func signature(_ m: ListMapping) -> String { "\(m.mode.rawValue):\(m.targetId ?? "")" }
+
+    func targetName(_ mode: MappingMode, _ id: String?) -> String {
+        guard let id else { return "?" }
+        switch mode {
+        case .project: return snapshot.tasks[id]?.title ?? "?"
+        case .area: return snapshot.areas[id]?.title ?? "?"
+        case .tag: return snapshot.tags[id]?.title ?? "?"
+        }
+    }
+
+    /// A mapping whose target changed since it was linked (another project, project to area, to a
+    /// tag, ...) keeps its links: each linked to-do still in the old target moves to the new one.
+    /// Without this the links fell out of scope, the reminders were detached, and the new target got
+    /// duplicates. The old project/area/tag is left in place, never deleted. Unlinked items already in
+    /// the new target are paired by title afterwards (the changed signature makes it a first link).
+    func migrateRetargetedMappings() async {
+        for m in activeOrder {
+            guard let target = m.targetId, let old = store.linkedMappings[m.id], old != signature(m),
+                  let colon = old.firstIndex(of: ":"), let oldMode = MappingMode(rawValue: String(old[..<colon]))
+            else { continue }
+            let oldTargetId = String(old[old.index(after: colon)...])
+            var oldMapping = m
+            oldMapping.mode = oldMode
+            oldMapping.targetId = oldTargetId.isEmpty ? nil : oldTargetId
+            var moved = 0
+            var failed = false
+            for link in store.links where link.mappingId == m.id {
+                guard var task = snapshot.tasks[link.thingsId], task.kind == .todo, !task.trashed,
+                      oldMapping.targetId != nil, matches(task, oldMapping), !matches(task, m) else { continue }
+                var patch = ThingsTodoPatch()
+                switch m.mode {
+                case .project: patch.placement = .project(target)
+                case .area: patch.placement = .area(target)
+                case .tag: patch.addTagIds = [target]
+                }
+                if oldMode == .tag, let oldTag = oldMapping.targetId, oldTag != target, task.tagIds.contains(oldTag) {
+                    patch.removeTagIds = [oldTag]
+                }
+                do {
+                    try await things.updateTodo(id: task.id, patch: patch)
+                    switch m.mode {
+                    case .project: task.projectId = target; task.areaId = nil; task.headingId = nil
+                    case .area: task.areaId = target; task.projectId = nil; task.headingId = nil
+                    case .tag: if !task.tagIds.contains(target) { task.tagIds.append(target) }
+                    }
+                    if let removed = patch.removeTagIds { task.tagIds.removeAll { removed.contains($0) } }
+                    snapshot.tasks[task.id] = task
+                    moved += 1
+                } catch {
+                    fail("Could not move \"\(task.title)\" to the new Things \(m.mode.rawValue): \(error.localizedDescription)")
+                    failed = true
+                }
+            }
+            if moved > 0 {
+                log(.change, "Moved \(moved) linked to-do\(moved == 1 ? "" : "s") for \"\(m.listTitle)\" from Things \(oldMode.rawValue) \"\(targetName(oldMode, oldMapping.targetId))\" to \(m.mode.rawValue) \"\(targetName(m.mode, target))\"; the old \(oldMode.rawValue) was left in place")
+            }
+            if failed {
+                // Leave the old signature so the next pass retries; skip the mapping now so links whose
+                // to-do did not move are not mistaken for items that left the list's scope.
+                activeById[m.id] = nil
+                activeOrder.removeAll { $0.id == m.id }
+            }
+        }
+    }
 
     /// Maps each in-scope Things to-do to the first matching mapping (config order).
     func buildThingsScope() {

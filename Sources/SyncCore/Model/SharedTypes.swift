@@ -259,11 +259,29 @@ public struct ListMapping: Codable, Hashable, Sendable, Identifiable {
     public var targetTitle: String
     /// For `.project` mode when the engine creates the project: the area to create it in.
     public var projectAreaId: String?
+    /// True while the user is choosing a target after changing the mode. The engine neither syncs
+    /// this mapping nor creates a target for it until the user picks one (or confirms "New…").
+    public var awaitingTarget: Bool
 
     public init(id: String, listTitle: String, enabled: Bool = true, mode: MappingMode = .project,
-                targetId: String? = nil, targetTitle: String, projectAreaId: String? = nil) {
+                targetId: String? = nil, targetTitle: String, projectAreaId: String? = nil, awaitingTarget: Bool = false) {
         self.id = id; self.listTitle = listTitle; self.enabled = enabled; self.mode = mode
         self.targetId = targetId; self.targetTitle = targetTitle; self.projectAreaId = projectAreaId
+        self.awaitingTarget = awaitingTarget
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, listTitle, enabled, mode, targetId, targetTitle, projectAreaId, awaitingTarget }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        listTitle = try c.decode(String.self, forKey: .listTitle)
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        mode = try c.decodeIfPresent(MappingMode.self, forKey: .mode) ?? .project
+        targetId = try c.decodeIfPresent(String.self, forKey: .targetId)
+        targetTitle = try c.decodeIfPresent(String.self, forKey: .targetTitle) ?? listTitle
+        projectAreaId = try c.decodeIfPresent(String.self, forKey: .projectAreaId)
+        awaitingTarget = try c.decodeIfPresent(Bool.self, forKey: .awaitingTarget) ?? false
     }
 }
 

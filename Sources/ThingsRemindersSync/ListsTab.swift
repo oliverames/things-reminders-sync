@@ -50,6 +50,8 @@ private struct ListRow: View {
     let list: ReminderList
 
     private static let newTag = "__new__"
+    private static let chooseTag = "__choose__"
+    @State private var creatingNew = false
 
     private var mapping: ListMapping? { coordinator.config.mappings.first { $0.id == list.id } }
     private var current: ListMapping {
@@ -78,7 +80,15 @@ private struct ListRow: View {
     }
 
     var body: some View {
-        Toggle(isOn: Binding(get: { current.enabled }, set: { value in edit { $0.enabled = value } })) {
+        Toggle(isOn: Binding(get: { current.enabled }, set: { value in
+            edit {
+                $0.enabled = value
+                // Turning a list on reuses an existing Things target with the list's name before creating one.
+                if value, $0.targetId == nil, !$0.awaitingTarget, let match = existingTarget(named: list.title, mode: $0.mode) {
+                    $0.targetId = match
+                }
+            }
+        })) {
             HStack(spacing: 8) {
                 Circle().fill(Color(hex: list.colorHex) ?? .gray).frame(width: 10, height: 10)
                 Text(list.title)
@@ -93,23 +103,49 @@ private struct ListRow: View {
 
         if current.enabled {
             Picker("Mirror as", selection: Binding(get: { current.mode }, set: { mode in
-                edit { $0.mode = mode; $0.targetId = nil; $0.targetTitle = list.title; $0.projectAreaId = nil }
+                guard mode != current.mode else { return }
+                creatingNew = false
+                // Never create anything on a mode change: pick a same-named target if one exists,
+                // otherwise pause the list until a target is chosen. Linked to-dos move on the next sync.
+                let match = existingTarget(named: list.title, mode: mode)
+                edit {
+                    $0.mode = mode; $0.targetId = match; $0.targetTitle = list.title; $0.projectAreaId = nil
+                    $0.awaitingTarget = match == nil
+                }
             })) {
                 Text("Project").tag(MappingMode.project)
                 Text("Area").tag(MappingMode.area)
                 Text("Tag").tag(MappingMode.tag)
             }
-            Picker(targetLabel, selection: Binding(get: { current.targetId ?? Self.newTag }, set: { value in
-                edit { $0.targetId = value == Self.newTag ? nil : value }
+            Picker(targetLabel, selection: Binding(get: {
+                if let id = current.targetId { return id }
+                return current.awaitingTarget && !creatingNew ? Self.chooseTag : Self.newTag
+            }, set: { value in
+                switch value {
+                case Self.chooseTag: return
+                case Self.newTag: creatingNew = true      // created only when "Create" is pressed
+                default: creatingNew = false; edit { $0.targetId = value; $0.awaitingTarget = false }
+                }
             })) {
+                if current.awaitingTarget && current.targetId == nil && !creatingNew { Text("Choose…").tag(Self.chooseTag) }
                 ForEach(targets, id: \.id) { Text($0.title).tag($0.id) }
                 Text("New…").tag(Self.newTag)
             }
-            if current.targetId == nil {
+            if current.awaitingTarget && current.targetId == nil && !creatingNew {
+                Text("Syncing for this list is paused until you choose a Things \(current.mode.rawValue). Linked to-dos move there on the next sync.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            if current.targetId == nil && (creatingNew || !current.awaitingTarget) {
                 NewTargetFields(title: current.targetTitle, mode: current.mode, areaId: current.projectAreaId,
                                 areas: coordinator.thingsAreas,
                                 onTitle: { value in edit { $0.targetTitle = value } },
                                 onArea: { value in edit { $0.projectAreaId = value } })
+                if current.awaitingTarget {
+                    Button("Create \(current.mode.rawValue.capitalized) \"\(current.targetTitle)\"") {
+                        creatingNew = false
+                        edit { $0.awaitingTarget = false }
+                    }
+                }
             }
             LabeledContent("Linked items", value: "\(coordinator.linkedCounts[list.id] ?? 0)")
             if current.mode == .tag {
@@ -117,6 +153,17 @@ private struct ListRow: View {
                     .font(.callout).foregroundStyle(.secondary)
             }
         }
+    }
+
+    private func existingTarget(named title: String, mode: MappingMode) -> String? {
+        let wanted = title.trimmingCharacters(in: .whitespaces).lowercased()
+        let candidates: [(id: String, title: String)] = switch mode {
+        case .project: coordinator.thingsProjects.map { ($0.id, $0.title) }
+        case .area: coordinator.thingsAreas.map { ($0.id, $0.title) }
+        case .tag: coordinator.thingsTags.map { ($0.id, $0.title) }
+        }
+        let hits = candidates.filter { $0.title.trimmingCharacters(in: .whitespaces).lowercased() == wanted }
+        return hits.count == 1 ? hits[0].id : nil
     }
 
     private var targetLabel: String {
