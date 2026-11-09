@@ -142,9 +142,16 @@ they must never be linked to Things to-dos.
 | notes (plain text) | notes (Markdown) | Things is authoritative for Markdown. Reminders gets a plain rendering (`[t](u)` → `t (u)`, emphasis markers and heading `#`s dropped). The link fingerprint stores the rendering, so Things Markdown is replaced only when the Reminders notes are edited. |
 | flagged | the tag named in settings (default "Important") | two-way; `update --private flagged`. |
 | tags | tags with the same title | two-way, only for titles that already exist in Things (no tag creation); the list's own mapping tag is excluded; `--private --set-tags`. |
-| subtasks (title, completed) | checklist items (`ChecklistItem3`: `tt`, `ss`, `ix`, `ts` = [task id]) | two-way; add with `--private --subtask`, complete or rename with the subtask's own id, delete the subtask reminder to remove one. Checklist key shapes must be sampled from Things 3.24 before the first write. |
+| subtasks (title, completed) | checklist items (`ChecklistItem3`: `tt`, `ss`, `ix`, `ts` = [task id]) | two-way; add with `--private --subtask`, complete or rename with the subtask's own id, delete the subtask reminder to remove one. Shape verified below. |
 | priority, urgent, early reminders, alarms other than the due time, location, images, assignee | none | preserved |
 | none | deadline (`dd`), This Evening, checklist notes | preserved |
+
+`ChecklistItem3` as Things 3.24.2 wrote it (three items added with the `things:///add` URL scheme,
+read back from history): `{"tt":"Alpha","ss":0,"sp":null,"ix":-518,"ts":["<task id>"],"lt":false,
+"cd":<now>,"md":<now>,"xx":{"_t":"oo","sn":{}}}`. Items sort by `ix` ascending (the app used -518,
+-310, 0 for Alpha, Beta, Gamma). Completion is expected to be `ss` 3 with `sp` like a to-do, and
+removal a `t` 2 tombstone; sample both from the app before the first such write. The parent to-do
+was written in the same commit as `Task7`, with `md` set on create (so `md` on creates is safe).
 
 Fingerprints are seeded from a re-read of the written item, and a skipped or failed write keeps the
 previous fingerprints (lessons from Remindian issues #74, #75 and #99).
