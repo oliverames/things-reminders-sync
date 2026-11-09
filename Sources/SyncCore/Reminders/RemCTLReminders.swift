@@ -177,6 +177,22 @@ public actor RemCTLReminders: RemindersBackend {
             guard let numericList = Int(listId) else { throw RemCTLError.tool("Reminders list not found") }
             fields["list_id"] = .number(Double(numericList))
         }
+        // Rich link, flag, tags and subtasks are private metadata writes. Without `private` RemCTL would append the
+        // link to the notes, so `private` always travels with them. A rich link can only be added, never replaced or
+        // cleared (viticci/remctl#79); the engine only sends one for a reminder that has none.
+        var privateFields: [String: JSONValue] = [:]
+        if let url = patch.url { privateFields["url"] = .string(url) }
+        if let flagged = patch.flagged { privateFields["flagged"] = .bool(flagged) }
+        if let tags = patch.tags {
+            // `set_tags` replaces every tag and takes ONE comma-separated string; `clear_tags` removes them all.
+            if tags.contains(where: { $0.contains(",") }) { throw RemCTLError.tool("RemCTL cannot write a tag whose name contains a comma") }
+            if tags.isEmpty { privateFields["clear_tags"] = true } else { privateFields["set_tags"] = .string(tags.joined(separator: ",")) }
+        }
+        if let subtasks = patch.addSubtasks, !subtasks.isEmpty { privateFields["subtasks"] = .array(subtasks.map { .string($0) }) }
+        if !privateFields.isEmpty {
+            fields.merge(privateFields) { $1 }
+            fields["private"] = true
+        }
         if !fields.isEmpty {
             fields["reminder_id"] = .number(Double(numeric))
             let result = try await transport.callTool("update_reminder", arguments: fields)
@@ -379,8 +395,12 @@ public actor RemCTLReminders: RemindersBackend {
         var isRepeating: Bool
         var recurrence: RepeatRule?
         var isSubtask: Bool
+        var parentId: Int?
         var deepLink: String?
         var section: String?
+        var url: String?
+        var tags: [String]
+        var flagged: Bool
 
         init?(_ json: JSONValue) {
             guard let id = json["id"]?.int else { return nil }
@@ -396,6 +416,10 @@ public actor RemCTLReminders: RemindersBackend {
             let dueDay = due
             recurrence = json["recurrence"].flatMap { $0.isNull ? nil : RemCTLRecurrence.rule(from: $0, due: dueDay) }
             isSubtask = json["isSubtask"]?.flag ?? false
+            parentId = json["parentID"]?.int
+            url = json["url"]?.string.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+            tags = (json["tags"]?.array ?? []).compactMap(\.string)
+            flagged = json["flagged"]?.flag ?? false
             deepLink = json["deepLink"]?.string
             section = json["section"]?.string
         }
@@ -438,6 +462,12 @@ public actor RemCTLReminders: RemindersBackend {
         var items: [ReminderItem] = []
         var seen: Set<String> = []
         var skipped: Set<String> = []
+        // Subtask rows are not reminders of their own: each is listed on its parent (checklist items in Things).
+        var subtasks: [Int: [ReminderSubtask]] = [:]
+        for json in rows {
+            guard let row = Row(json), row.isSubtask, let parent = row.parentId else { continue }
+            subtasks[parent, default: []].append(ReminderSubtask(id: String(row.id), title: row.title, completed: row.completed))
+        }
         for json in rows {
             guard let row = Row(json) else { continue }
             seen.insert(String(row.id))
@@ -447,7 +477,7 @@ public actor RemCTLReminders: RemindersBackend {
                 continue
             }
             let section = sectionLists.contains(list) ? sections[row.id] : nil
-            items.append(observe(item: Self.item(row, listId: list, section: section), persist: false))
+            items.append(observe(item: Self.item(row, listId: list, section: section, subtasks: subtasks[row.id] ?? []), persist: false))
         }
         for title in skipped { logger.warning("Skipping reminders in \(title, privacy: .public): several lists share that title") }
         for id in observed.keys where !seen.contains(id) { observed[id] = nil }
@@ -495,10 +525,12 @@ public actor RemCTLReminders: RemindersBackend {
 
     // MARK: Mapping and formatting helpers
 
-    private static func item(_ row: Row, listId: String, section: String?) -> ReminderItem {
+    private static func item(_ row: Row, listId: String, section: String?, subtasks: [ReminderSubtask] = []) -> ReminderItem {
         ReminderItem(id: String(row.id), externalId: row.deepLink, listId: listId, title: row.title, notes: row.notes,
                      due: row.due, completed: row.completed, completionDate: row.completionDate,
-                     lastModified: nil, isRepeating: row.isRepeating, section: section, recurrence: row.recurrence)
+                     lastModified: nil, isRepeating: row.isRepeating, section: section, recurrence: row.recurrence,
+                     url: row.url, tags: row.tags, flagged: row.flagged, subtasks: subtasks,
+                     parentId: row.parentId.map(String.init))
     }
 
     static func contentHash(_ item: ReminderItem) -> String {
@@ -507,6 +539,12 @@ public actor RemCTLReminders: RemindersBackend {
         var parts = [item.title, item.notes, due, item.completed ? "1" : "0", completion, item.listId]
         if let rule = item.recurrence { parts.append("rule:" + stableDescription(rule)) } else if item.isRepeating { parts.append("rule:?") }
         if let section = item.section { parts.append(section) }   // appended only when set, so hashes of unsectioned items are unchanged
+        // The same holds for the fields below: items without a link, tags, flag or subtasks keep their old hash.
+        if let url = item.url { parts.append("url:" + url) }
+        if !item.tags.isEmpty { parts.append("tags:" + item.tags.sorted().joined(separator: ",")) }
+        if item.flagged { parts.append("flagged") }
+        // Subtasks are left out on purpose: `get_reminder` rows do not list them, and the stamp only decides which side's
+        // edit is newer; subtasks merge without it.
         return sha(parts.joined(separator: "\u{1F}"))
     }
 

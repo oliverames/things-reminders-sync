@@ -13,10 +13,19 @@ struct ThingsDatabase: Sendable {
     var tasks: [String: Row] = [:]
     var areas: [String: ThingsArea] = [:]
     var tags: [String: ThingsTag] = [:]
+    /// Checklist items by their own id, with the parent task id (`ts`).
+    struct ChecklistRow: Sendable { var taskId: String?; var item: ThingsChecklistItem }
+    var checklistItems: [String: ChecklistRow] = [:]
     var latestServerIndex = 0
 
     var snapshot: ThingsSnapshot {
-        ThingsSnapshot(tasks: tasks.mapValues(\.task), areas: areas, tags: tags)
+        var byTask: [String: [ThingsChecklistItem]] = [:]
+        for row in checklistItems.values { if let t = row.taskId { byTask[t, default: []].append(row.item) } }
+        return ThingsSnapshot(tasks: tasks.mapValues { row in
+            var task = row.task
+            if let items = byTask[task.id] { task.checklist = items.sorted { ($0.index, $0.id) < ($1.index, $1.id) } }
+            return task
+        }, areas: areas, tags: tags)
     }
 
     /// Applies one history item. Returns the task ids it touched.
@@ -28,6 +37,7 @@ struct ThingsDatabase: Sendable {
                 if tasks.removeValue(forKey: id) != nil { touched.insert(id) }
                 areas.removeValue(forKey: id)
                 tags.removeValue(forKey: id)
+                checklistItems.removeValue(forKey: id)
                 continue
             }
             let p = change.p
@@ -37,6 +47,13 @@ struct ThingsDatabase: Sendable {
                 Self.mergeTask(&row, p)
                 tasks[id] = row
                 touched.insert(id)
+            } else if change.e.hasPrefix("ChecklistItem") {
+                var row = change.t == 0 ? ChecklistRow(taskId: nil, item: ThingsChecklistItem(id: id, title: "")) : (checklistItems[id] ?? ChecklistRow(taskId: nil, item: ThingsChecklistItem(id: id, title: "")))
+                if let v = p["tt"] { row.item.title = v.string ?? "" }
+                if let v = p["ss"] { row.item.completed = (v.int ?? 0) != 0 }
+                if let v = p["ix"] { row.item.index = v.double ?? 0 }
+                if let v = p["ts"] { row.taskId = v.array?.first?.string }
+                checklistItems[id] = row
             } else if change.e.hasPrefix("Area") {
                 var area = change.t == 0 ? ThingsArea(id: id, title: "") : (areas[id] ?? ThingsArea(id: id, title: ""))
                 if let tt = p["tt"] { area.title = tt.string ?? "" }

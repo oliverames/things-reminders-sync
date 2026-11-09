@@ -150,7 +150,7 @@ public actor ThingsCloudClient: ThingsBackend {
                     title: draft.title, notes: draft.notes, type: 0, scheduling: try ThingsChanges.templateScheduling(first),
                     containers: ThingsChanges.containers(draft.placement), tags: draft.tagIds,
                     completed: false, completionDate: nil, now: now(), extra: ["rr": rr, "icc": 0])
-                try await commit([id: change])
+                try await commit([id: change].merging(checklistCreates(taskId: id, draft.checklist, startIndex: 0)) { $1 })
                 return id
             }
             let scheduling: [String: JSONValue]
@@ -163,9 +163,54 @@ public actor ThingsCloudClient: ThingsBackend {
                 title: draft.title, notes: draft.notes, type: 0, scheduling: scheduling,
                 containers: ThingsChanges.containers(draft.placement), tags: draft.tagIds,
                 completed: draft.completed, completionDate: draft.completionDate, now: now())
-            try await commit([id: change])
+            try await commit([id: change].merging(checklistCreates(taskId: id, draft.checklist, startIndex: 0)) { $1 })
             return id
         }
+    }
+
+    private func checklistCreates(taskId: String, _ items: [ThingsChecklistDraft], startIndex: Double) -> ThingsChangeMap {
+        var map: ThingsChangeMap = [:]
+        for (i, item) in items.enumerated() {
+            map[ThingsID.generate()] = ThingsChanges.checklistCreate(taskId: taskId, title: item.title, completed: item.completed,
+                                                                      index: startIndex + Double(i), now: now())
+        }
+        return map
+    }
+
+    /// The commit entries for checklist changes of a to-do. Ids of items to rename, complete or delete must exist.
+    /// TODO(orchestrator): only the create shape is sampled from Things 3.24.2; completion (`ss` 3 + `sp`), rename and delete
+    /// (`t` 2) follow the to-do conventions and are unverified, so the engine gates every call on `SyncConfig.syncChecklists`.
+    private func checklistWrites(taskId: String, _ changes: [ThingsChecklistChange], existing: [ThingsChecklistItem]) throws -> ThingsChangeMap {
+        var map: ThingsChangeMap = [:]
+        var next = (existing.map(\.index).max() ?? -1) + 1
+        let known = Set(existing.map(\.id))
+        func need(_ id: String) throws {
+            guard known.contains(id) else { throw ThingsCloudError.notFound("checklist item \(id)") }
+        }
+        let nowTs = now().timeIntervalSince1970
+        // Several changes to one item travel as one update entry.
+        func merge(_ id: String, _ p: [String: JSONValue]) {
+            var combined = map[id]?.t == 1 ? map[id]!.p : [:]
+            combined.merge(p) { $1 }
+            map[id] = ThingsChanges.checklistUpdate(combined, now: now())
+        }
+        for change in changes {
+            switch change {
+            case let .add(title, completed):
+                map[ThingsID.generate()] = ThingsChanges.checklistCreate(taskId: taskId, title: title, completed: completed, index: next, now: now())
+                next += 1
+            case let .rename(id, title):
+                try need(id)
+                merge(id, ["tt": .string(title)])
+            case let .setCompleted(id, completed):
+                try need(id)
+                merge(id, ["ss": completed ? 3 : 0, "sp": completed ? .number(nowTs) : .null])
+            case let .delete(id):
+                try need(id)
+                map[id] = ThingsChanges.checklistDelete()
+            }
+        }
+        return map
     }
 
     public func updateTodo(id: String, patch: ThingsTodoPatch) async throws {
@@ -174,6 +219,7 @@ public actor ThingsCloudClient: ThingsBackend {
             if database?.tasks[id] == nil { _ = try await refreshLocked() } // created elsewhere since the last pull
             guard let current = database?.tasks[id]?.task else { throw ThingsCloudError.notFound("to-do \(id)") }
             guard !patch.isEmpty else { return }
+            let existingChecklist = (database?.checklistItems.values ?? [:].values).filter { $0.taskId == id }.map(\.item)
 
             let nowDate = now()
             let nowTs = nowDate.timeIntervalSince1970
@@ -222,7 +268,11 @@ public actor ThingsCloudClient: ThingsBackend {
                     p["tir"] = scheduling["tir"]; p["icsd"] = scheduling["icsd"]; p["ato"] = scheduling["ato"]
                 }
             }
-            try await commit([id: ThingsChange(t: 1, e: ThingsEntity.task, p: p)])
+            var map: ThingsChangeMap = [id: ThingsChange(t: 1, e: ThingsEntity.task, p: p)]
+            if let changes = patch.checklist, !changes.isEmpty {
+                map.merge(try checklistWrites(taskId: id, changes, existing: existingChecklist)) { $1 }
+            }
+            try await commit(map)
         }
     }
 

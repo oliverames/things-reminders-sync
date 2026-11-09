@@ -48,8 +48,10 @@ actor DryRunReminders: RemindersBackend {
         say("create \"\(title)\" list=\(listId) due=\(due.map(describe) ?? "none") section=\(section ?? "-")"
             + (recurrence.map { " REPEAT=\($0)" } ?? ""))
         next += 1
-        return ReminderItem(id: "DRYRUN-\(next)", listId: listId, title: title, notes: notes, due: due, completed: completed,
-                            completionDate: completionDate, isRepeating: recurrence != nil, section: section, recurrence: recurrence)
+        let item = ReminderItem(id: "DRYRUN-\(next)", listId: listId, title: title, notes: notes, due: due, completed: completed,
+                                completionDate: completionDate, isRepeating: recurrence != nil, section: section, recurrence: recurrence)
+        seen[item.id] = item
+        return item
     }
     func update(id: String, patch: ReminderPatch) async throws -> ReminderItem {
         say("update \(id) \"\(seen[id]?.title ?? "?")\": \(patch)")
@@ -61,6 +63,11 @@ actor DryRunReminders: RemindersBackend {
         if let v = patch.listId { r.listId = v }
         if let v = patch.section { r.section = v }
         if let v = patch.recurrence { r.recurrence = v; r.isRepeating = v != nil }
+        if let v = patch.url { r.url = v }
+        if let v = patch.flagged { r.flagged = v }
+        if let v = patch.tags { r.tags = v }
+        for (i, title) in (patch.addSubtasks ?? []).enumerated() { r.subtasks.append(ReminderSubtask(id: "\(id)-sub\(r.subtasks.count + i)", title: title)) }
+        seen[id] = r
         return r
     }
     func delete(id: String) async throws { say("DELETE \(id) \"\(seen[id]?.title ?? "?")\"") }

@@ -27,6 +27,33 @@ public enum ThingsStatus: Int, Codable, Sendable { case open = 0, canceled = 2, 
 /// Things `st`: 0 Inbox, 1 Anytime (or Today/scheduled when a start date is set), 2 Someday (or Upcoming with a future date).
 public enum ThingsStart: Int, Codable, Sendable { case inbox = 0, anytime = 1, someday = 2 }
 
+/// One Things checklist item (`ChecklistItem3`), read from history. Items sort by `index` (`ix`) ascending.
+public struct ThingsChecklistItem: Codable, Hashable, Sendable, Identifiable {
+    public var id: String
+    public var title: String
+    /// `ss` 3 (completed) or 2 (canceled, which counts as done like it does for a to-do).
+    public var completed: Bool
+    public var index: Double
+    public init(id: String, title: String, completed: Bool = false, index: Double = 0) {
+        self.id = id; self.title = title; self.completed = completed; self.index = index
+    }
+}
+
+/// A checklist item to create with a to-do.
+public struct ThingsChecklistDraft: Codable, Hashable, Sendable {
+    public var title: String
+    public var completed: Bool
+    public init(title: String, completed: Bool = false) { self.title = title; self.completed = completed }
+}
+
+/// One change to a to-do's checklist (the engine only sends these when `SyncConfig.syncChecklists` is on).
+public enum ThingsChecklistChange: Codable, Hashable, Sendable {
+    case add(title: String, completed: Bool)
+    case rename(id: String, title: String)
+    case setCompleted(id: String, completed: Bool)
+    case delete(id: String)
+}
+
 public struct ThingsTask: Codable, Hashable, Sendable, Identifiable {
     public var id: String
     public var kind: ThingsTaskKind
@@ -61,13 +88,22 @@ public struct ThingsTask: Codable, Hashable, Sendable, Identifiable {
     public var nextDay: String?
     public var instanceDay: String?
     public var instancesCreated: Int?
+    /// Checklist items, ordered by `ix`. Read from history whatever the config says.
+    /// (Stored optional so state saved before checklists existed still decodes.)
+    public var checklist: [ThingsChecklistItem] {
+        get { storedChecklist ?? [] }
+        set { storedChecklist = newValue.isEmpty ? nil : newValue }
+    }
+    private var storedChecklist: [ThingsChecklistItem]?
 
     public init(id: String, kind: ThingsTaskKind = .todo, title: String, notes: String = "", status: ThingsStatus = .open,
                 stopDate: Date? = nil, trashed: Bool = false, start: ThingsStart = .anytime, startDate: String? = nil,
                 reminderSeconds: Int? = nil, evening: Bool = false, deadline: String? = nil, projectId: String? = nil,
                 headingId: String? = nil, areaId: String? = nil, tagIds: [String] = [], creationDate: Date? = nil,
                 modificationDate: Date? = nil, isRepeating: Bool = false, recurrence: RepeatRule? = nil,
-                templateId: String? = nil, nextDay: String? = nil, instanceDay: String? = nil, instancesCreated: Int? = nil) {
+                templateId: String? = nil, nextDay: String? = nil, instanceDay: String? = nil, instancesCreated: Int? = nil,
+                checklist: [ThingsChecklistItem] = []) {
+        self.storedChecklist = checklist.isEmpty ? nil : checklist
         self.id = id; self.kind = kind; self.title = title; self.notes = notes; self.status = status
         self.stopDate = stopDate; self.trashed = trashed; self.start = start; self.startDate = startDate
         self.reminderSeconds = reminderSeconds; self.evening = evening; self.deadline = deadline
@@ -123,11 +159,14 @@ public struct ThingsTodoPatch: Codable, Hashable, Sendable {
     public var recurrence: RepeatRule?
     /// Templates only: moves the next occurrence (`tir`, `icsd`) and sets the reminder time (`ato`).
     public var templateNext: DueDate?
+    /// Checklist changes, written as `ChecklistItem3` entities in the same commit as the to-do.
+    public var checklist: [ThingsChecklistChange]?
 
     public init(title: String? = nil, notes: String? = nil, when: DueDate?? = nil, completed: Bool? = nil,
                 completionDate: Date? = nil, placement: ThingsPlacement? = nil, addTagIds: [String]? = nil,
                 removeTagIds: [String]? = nil, trashed: Bool? = nil, recurrence: RepeatRule? = nil,
-                templateNext: DueDate? = nil) {
+                templateNext: DueDate? = nil, checklist: [ThingsChecklistChange]? = nil) {
+        self.checklist = checklist
         self.title = title; self.notes = notes; self.when = when; self.completed = completed
         self.completionDate = completionDate; self.placement = placement; self.addTagIds = addTagIds
         self.removeTagIds = removeTagIds; self.trashed = trashed; self.recurrence = recurrence
@@ -137,6 +176,7 @@ public struct ThingsTodoPatch: Codable, Hashable, Sendable {
     public var isEmpty: Bool {
         title == nil && notes == nil && when == nil && completed == nil && placement == nil
             && addTagIds == nil && removeTagIds == nil && trashed == nil && recurrence == nil && templateNext == nil
+            && (checklist?.isEmpty ?? true)
     }
 }
 
@@ -150,10 +190,13 @@ public struct ThingsTodoDraft: Codable, Hashable, Sendable {
     public var tagIds: [String]
     /// When set, a repeating TEMPLATE is created (never an occurrence): `when` is the first occurrence.
     public var recurrence: RepeatRule?
+    /// Checklist items to create with the to-do (empty unless `SyncConfig.syncChecklists` is on).
+    public var checklist: [ThingsChecklistDraft]
 
     public init(title: String, notes: String = "", when: DueDate? = nil, completed: Bool = false,
                 completionDate: Date? = nil, placement: ThingsPlacement = .inbox, tagIds: [String] = [],
-                recurrence: RepeatRule? = nil) {
+                recurrence: RepeatRule? = nil, checklist: [ThingsChecklistDraft] = []) {
+        self.checklist = checklist
         self.title = title; self.notes = notes; self.when = when; self.completed = completed
         self.completionDate = completionDate; self.placement = placement; self.tagIds = tagIds
         self.recurrence = recurrence
@@ -220,6 +263,15 @@ public struct ReminderList: Codable, Hashable, Sendable, Identifiable {
     }
 }
 
+/// A Reminders subtask (a reminder of its own with a parent), as listed on its parent.
+public struct ReminderSubtask: Codable, Hashable, Sendable, Identifiable {
+    /// The subtask's own RemCTL id; complete, rename or delete it through this id.
+    public var id: String
+    public var title: String
+    public var completed: Bool
+    public init(id: String, title: String, completed: Bool = false) { self.id = id; self.title = title; self.completed = completed }
+}
+
 public struct ReminderItem: Codable, Hashable, Sendable, Identifiable {
     /// RemCTL's numeric reminder id, as a string (stable).
     public var id: String
@@ -238,10 +290,36 @@ public struct ReminderItem: Codable, Hashable, Sendable, Identifiable {
     public var recurrence: RepeatRule?
     /// The Reminders section the item sits in, if any.
     public var section: String?
+    /// The rich link (RemCTL `url`); the notes never contain it.
+    public var url: String?
+    /// Tag names.
+    public var tags: [String] {
+        get { storedTags ?? [] }
+        set { storedTags = newValue.isEmpty ? nil : newValue }
+    }
+    public var flagged: Bool {
+        get { storedFlagged ?? false }
+        set { storedFlagged = newValue ? true : nil }
+    }
+    /// The item's subtasks, in Reminders order. Subtask rows are never items of their own.
+    public var subtasks: [ReminderSubtask] {
+        get { storedSubtasks ?? [] }
+        set { storedSubtasks = newValue.isEmpty ? nil : newValue }
+    }
+    // Stored optional so reminders saved before field fidelity still decode.
+    private var storedTags: [String]?
+    private var storedFlagged: Bool?
+    private var storedSubtasks: [ReminderSubtask]?
+    /// Set only on a subtask row; the engine never links such a row as a to-do.
+    public var parentId: String?
     public init(id: String, externalId: String? = nil, listId: String, title: String, notes: String = "",
                 due: DueDate? = nil, completed: Bool = false, completionDate: Date? = nil,
                 lastModified: Date? = nil, isRepeating: Bool = false, section: String? = nil,
-                recurrence: RepeatRule? = nil) {
+                recurrence: RepeatRule? = nil, url: String? = nil, tags: [String] = [], flagged: Bool = false,
+                subtasks: [ReminderSubtask] = [], parentId: String? = nil) {
+        self.url = url; self.parentId = parentId
+        self.storedTags = tags.isEmpty ? nil : tags; self.storedFlagged = flagged ? true : nil
+        self.storedSubtasks = subtasks.isEmpty ? nil : subtasks
         self.recurrence = recurrence
         self.id = id; self.externalId = externalId; self.listId = listId; self.title = title; self.notes = notes
         self.due = due; self.completed = completed; self.completionDate = completionDate
@@ -262,13 +340,24 @@ public struct ReminderPatch: Codable, Hashable, Sendable {
     public var section: String??
     /// `.some(rule)` sets the repeat rule; `.some(nil)` removes the repeat (`remctl edit --recurrence clear`).
     public var recurrence: RepeatRule??
+    /// Adds a rich link (`--private --url`). RemCTL can never replace or clear one (viticci/remctl#79), so the engine
+    /// only sets this on a reminder that has no link.
+    public var url: String?
+    public var flagged: Bool?
+    /// Replaces ALL tags of the reminder (`--private --set-tags`; empty clears them).
+    public var tags: [String]?
+    /// Adds subtasks with these titles to the reminder (`--private --subtasks`).
+    public var addSubtasks: [String]?
     public init(title: String? = nil, notes: String? = nil, due: DueDate?? = nil, completed: Bool? = nil,
-                completionDate: Date? = nil, listId: String? = nil, section: String?? = nil, recurrence: RepeatRule?? = nil) {
+                completionDate: Date? = nil, listId: String? = nil, section: String?? = nil, recurrence: RepeatRule?? = nil,
+                url: String? = nil, flagged: Bool? = nil, tags: [String]? = nil, addSubtasks: [String]? = nil) {
+        self.url = url; self.flagged = flagged; self.tags = tags; self.addSubtasks = addSubtasks
         self.title = title; self.notes = notes; self.due = due; self.completed = completed
         self.completionDate = completionDate; self.listId = listId; self.section = section; self.recurrence = recurrence
     }
     public var isEmpty: Bool {
         title == nil && notes == nil && due == nil && completed == nil && listId == nil && section == nil && recurrence == nil
+            && url == nil && flagged == nil && tags == nil && (addSubtasks?.isEmpty ?? true)
     }
 }
 
@@ -386,10 +475,19 @@ public struct SyncConfig: Codable, Hashable, Sendable {
     public var remindersPollSeconds: Int
     /// Explicit path to the `remctl` executable; nil searches `~/bin`, `/opt/homebrew/bin`, `/usr/local/bin`.
     public var remctlPath: String?
+    /// Title of the existing Things tag a flagged reminder carries (two-way). When no tag has this title the flag is
+    /// not synced (nothing is created).
+    public var flaggedTagTitle: String
+    /// Writes Reminders subtasks to Things checklists (create, complete, delete). Off until the completion and
+    /// deletion shapes of `ChecklistItem3` have been sampled from the Things app (docs/SPEC.md); Things checklists still
+    /// sync to Reminders subtasks.
+    public var syncChecklists: Bool
 
     public init(mappings: [ListMapping] = [], pollSeconds: Int = 15, reconcileMinutes: Int = 10,
                 includeCompletedOnFirstLink: Bool = false, propagateDeletes: Bool = true,
-                remindersPollSeconds: Int = 10, remctlPath: String? = nil) {
+                remindersPollSeconds: Int = 10, remctlPath: String? = nil,
+                flaggedTagTitle: String = "Important", syncChecklists: Bool = false) {
+        self.flaggedTagTitle = flaggedTagTitle; self.syncChecklists = syncChecklists
         self.mappings = mappings; self.pollSeconds = pollSeconds; self.reconcileMinutes = reconcileMinutes
         self.includeCompletedOnFirstLink = includeCompletedOnFirstLink; self.propagateDeletes = propagateDeletes
         self.remindersPollSeconds = remindersPollSeconds; self.remctlPath = remctlPath
@@ -405,6 +503,8 @@ public struct SyncConfig: Codable, Hashable, Sendable {
         propagateDeletes = try c.decodeIfPresent(Bool.self, forKey: .propagateDeletes) ?? true
         remindersPollSeconds = try c.decodeIfPresent(Int.self, forKey: .remindersPollSeconds) ?? 10
         remctlPath = try c.decodeIfPresent(String.self, forKey: .remctlPath)
+        flaggedTagTitle = try c.decodeIfPresent(String.self, forKey: .flaggedTagTitle) ?? "Important"
+        syncChecklists = try c.decodeIfPresent(Bool.self, forKey: .syncChecklists) ?? false
     }
 }
 

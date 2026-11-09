@@ -128,6 +128,16 @@ enum ThingsChangeValidator {
                 }
                 if let icc = change.p["icc"], !icc.isNull, (icc.int ?? -1) < 0 { problems.append("\(id): icc must be an integer >= 0") }
             }
+            if change.e.hasPrefix("ChecklistItem"), change.t != 2 {
+                // A checklist item belongs to exactly one task, has a title, a valid status and a finite sort index.
+                if change.t == 0 || change.p["ts"] != nil {
+                    if (change.p["ts"]?.array?.count ?? 0) != 1 { problems.append("\(id): a checklist item needs exactly one parent task in ts") }
+                }
+                if let tt = change.p["tt"], tt.string == nil { problems.append("\(id): tt must be a string") }
+                if let ss = change.p["ss"], ![0, 2, 3].contains(ss.int ?? -1) { problems.append("\(id): ss must be 0, 2 or 3") }
+                if let ix = change.p["ix"], !(ix.double?.isFinite ?? false) { problems.append("\(id): ix must be a finite number") }
+                if change.t == 0, change.p["tt"] == nil { problems.append("\(id): a new checklist item needs a title") }
+            }
             for key in timestampKeys + calendarDateKeys {
                 guard let value = change.p[key], !value.isNull else { continue }
                 guard let v = value.double, v.isFinite, v >= 0, v <= latestTimestamp else {

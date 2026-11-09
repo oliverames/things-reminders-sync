@@ -28,6 +28,7 @@ actor FakeThings: ThingsBackend {
         created.append(d)
         let id = nextId("T")
         var t = ThingsTask(id: id, title: d.title, notes: d.notes, tagIds: d.tagIds, modificationDate: Date())
+        t.checklist = d.checklist.enumerated().map { ThingsChecklistItem(id: nextId("CI"), title: $1.title, completed: $1.completed, index: Double($0)) }
         if let rule = d.recurrence {
             // A template: never an occurrence. `tir` and `icsd` are the first occurrence day.
             t.isRepeating = true; t.recurrence = rule; t.start = .someday
@@ -76,6 +77,15 @@ actor FakeThings: ThingsBackend {
         if let add = p.addTagIds { t.tagIds += add }
         if let rem = p.removeTagIds { t.tagIds.removeAll { rem.contains($0) } }
         if let tr = p.trashed { t.trashed = tr }
+        for change in p.checklist ?? [] {
+            switch change {
+            case let .add(title, done):
+                t.checklist.append(ThingsChecklistItem(id: nextId("CI"), title: title, completed: done, index: Double(t.checklist.count)))
+            case let .rename(id, title): if let i = t.checklist.firstIndex(where: { $0.id == id }) { t.checklist[i].title = title }
+            case let .setCompleted(id, done): if let i = t.checklist.firstIndex(where: { $0.id == id }) { t.checklist[i].completed = done }
+            case let .delete(id): t.checklist.removeAll { $0.id == id }
+            }
+        }
         if let rule = p.recurrence { t.recurrence = rule }
         if let next = p.templateNext { t.nextDay = next.day; t.instanceDay = next.day; t.reminderSeconds = next.reminderSeconds }
         t.modificationDate = Date()
@@ -114,6 +124,13 @@ actor FakeReminders: RemindersBackend {
     private var counter = 0
     private(set) var deletes: [String] = []
     private(set) var created: [(title: String, due: DueDate?, rule: RepeatRule)] = []
+    /// Every `update` call, in order, so tests can check that a write carries only the fields that changed.
+    private(set) var patches: [(id: String, patch: ReminderPatch)] = []
+    /// Simulates RemCTL not taking a rich link / flag / subtask write.
+    var ignoresURL = false, ignoresFlag = false, ignoresSubtasks = false
+    func setIgnores(url: Bool = false, flag: Bool = false, subtasks: Bool = false) { ignoresURL = url; ignoresFlag = flag; ignoresSubtasks = subtasks }
+    func clearPatches() { patches = [] }
+    private var subtaskCounter = 0
     private(set) var recurrenceWrites: [(id: String, rule: RepeatRule?)] = []
     /// Every completion request on a repeating reminder: the id and the completion date it was (wrongly) given.
     private(set) var completions: [(id: String, date: Date?)] = []
@@ -164,7 +181,24 @@ actor FakeReminders: RemindersBackend {
     }
 
     func update(id: String, patch p: ReminderPatch) async throws -> ReminderItem {
+        patches.append((id, p))
+        // A subtask is a reminder of its own: it is renamed and completed through its own id.
+        for (parentId, parent) in items {
+            if let i = parent.subtasks.firstIndex(where: { $0.id == id }) {
+                var updated = parent
+                if let v = p.title { updated.subtasks[i].title = v }
+                if let c = p.completed { updated.subtasks[i].completed = c }
+                items[parentId] = updated
+                return updated
+            }
+        }
         guard var r = items[id] else { throw NSError(domain: "fake", code: 1) }
+        if let u = p.url, !ignoresURL { r.url = u }
+        if let f = p.flagged, !ignoresFlag { r.flagged = f }
+        if let t = p.tags { r.tags = t }
+        if let titles = p.addSubtasks, !ignoresSubtasks {
+            for title in titles { subtaskCounter += 1; r.subtasks.append(ReminderSubtask(id: "S\(subtaskCounter)", title: title)) }
+        }
         if let v = p.title { r.title = v }
         if let v = p.notes { r.notes = v }
         if let d = p.due { r.due = d }
@@ -191,7 +225,14 @@ actor FakeReminders: RemindersBackend {
         return r
     }
 
-    func delete(id: String) async throws { deletes.append(id); items[id] = nil }
+    func delete(id: String) async throws {
+        deletes.append(id)
+        for (parentId, parent) in items where parent.subtasks.contains(where: { $0.id == id }) {
+            items[parentId]?.subtasks.removeAll { $0.id == id }
+            return
+        }
+        items[id] = nil
+    }
     nonisolated func changes() -> AsyncStream<Void> { AsyncStream { $0.finish() } }
 }
 

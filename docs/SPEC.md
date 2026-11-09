@@ -32,10 +32,13 @@ Capability Host authorized for Reminders; the app needs no Reminders permission 
 - Transport: one long-lived `remctl mcp serve` child (JSON-RPC lines on stdio, handshake once, requests
   serialized, 30 s timeout, restart once on EOF/crash/timeout, stderr drained). Tools used: `lists`,
   `create_reminder`, `update_reminder`, `set_completion`, `delete_reminder`, `get_reminder`, `get_list` (section names).
+  Link, flag, tags and subtasks are written by `update_reminder` with `private: true`: `url`, `flagged`, `set_tags` (ONE comma-separated
+  string) or `clear_tags`, `subtasks` (array of titles). A subtask is otherwise a reminder: complete, rename or delete it by its own id.
 - Reads: `remctl export --json` as a one-shot process, because MCP tool results are capped (about 170 KB,
   which cuts the export to roughly a third of the rows). List titles in rows map to list ids through
   the latest `lists` result; rows in lists whose title is shared by several lists are skipped and logged.
-  Subtasks are skipped. Ids are RemCTL's numeric ids as strings.
+  Subtask rows (`isSubtask`, `parentID`) are never items: each is listed on its parent as `subtasks`. Rows also carry `url` (rich
+  link), `tags` and `flagged`. Ids are RemCTL's numeric ids as strings.
 - Due dates: `dueDate` plus `allDay` map to `DueDate` (the time part is ignored when all-day). A timed due
   is written with an `alarm` at the same instant (mirroring the Things reminder); clearing a due also
   clears the alarm. Any `recurrence` means repeating (see "Repeating items"). Completion uses `set_completion`,
@@ -108,7 +111,7 @@ A Things item that matches several mappings belongs to the first one in `config.
 mappings are tried before every other mode, so a to-do under a mapped heading is never also claimed by a project
 mapping of the same project, wherever that mapping is listed. Several lists may map to different headings of one project.
 A heading target exists while it is a non-trashed task of kind heading. Sections are ignored in heading mode.
-Only to-dos sync: never projects, headings or checklist items. Repeating items sync as rules (see
+Only to-dos sync: never projects or headings (checklist items sync as part of their to-do, see Field fidelity). Repeating items sync as rules (see
 "Repeating items"). Things items that are trashed are out of scope except as deletions of linked pairs.
 
 ## Field mapping
@@ -116,7 +119,7 @@ Only to-dos sync: never projects, headings or checklist items. Repeating items s
 | Reminders | Things |
 |---|---|
 | title | `tt` |
-| notes (plain text) | notes (Markdown passes through untouched) |
+| notes (plain text) + rich link | notes (Markdown, link as a trailing line), see Field fidelity |
 | due all-day day | When = that day (`sr`), no reminder |
 | due day + time | When = that day, reminder `ato` = that time |
 | no due date | Anytime; but leave a Things item in Someday alone, and leave Today/Evening alone if it has no time |
@@ -126,35 +129,80 @@ Only to-dos sync: never projects, headings or checklist items. Repeating items s
 | list | placement per the mapping (moving between mapped lists moves between targets, and back) |
 | section (project mode, `syncSections`) | heading title of the to-do in the target project |
 
-### Field fidelity (planned, verified against RemCTL 2.5.0 on 2026-11-09)
+### Field fidelity
 
-Each side keeps its own display conventions; a field one side cannot represent is preserved and
-never cleared by the sync. Patches carry only the fields that changed (never a whole-item rewrite).
+Each side keeps its own display conventions; a field one side cannot represent is preserved and never cleared by the sync.
+Patches carry only the fields that changed (never a whole-item rewrite). Code: `Engine/FieldFidelity.swift`.
 
-`remctl export --json` already reports everything below in one call, so no per-reminder reads:
-`url` (the rich link), `tags` (names), `flagged`, `subtaskCount`, and subtask rows with
-`isSubtask: true` and `parentID`. Subtask rows are not reminders in their own right for the sync:
-they must never be linked to Things to-dos.
+`remctl export --json` reports everything below in one call (no per-reminder reads): `url` (the rich link), `tags` (names),
+`flagged`, `subtaskCount`, and subtask rows with `isSubtask: true` and `parentID`. Subtask rows are never linked as to-dos:
+`RemCTLReminders` folds them into their parent's `subtasks`, and the engine also drops any item that has a `parentId`.
 
 | Reminders | Things | Rule |
 |---|---|---|
-| rich link (`url`) | a bare URL as the last line of the notes, after a blank line | Reminders → Things: append the line unless the URL already appears in the notes. Things → Reminders: when the reminder has no link, a trailing URL line becomes the rich link (`--private --url`) and is left out of the Reminders notes. RemCTL can only add a rich link, never replace or clear one ([viticci/remctl#79](https://github.com/viticci/remctl/issues/79)), so when the reminder already has a different link, the Things line stays in the Reminders notes as text. Links inside the note text stay in the notes on both sides. |
-| notes (plain text) | notes (Markdown) | Things is authoritative for Markdown. Reminders gets a plain rendering (`[t](u)` → `t (u)`, emphasis markers and heading `#`s dropped). The link fingerprint stores the rendering, so Things Markdown is replaced only when the Reminders notes are edited. |
-| flagged | the tag named in settings (default "Important") | two-way; `update --private flagged`. |
-| tags | tags with the same title | two-way, only for titles that already exist in Things (no tag creation); the list's own mapping tag is excluded; `--private --set-tags`. |
-| subtasks (title, completed) | checklist items (`ChecklistItem3`: `tt`, `ss`, `ix`, `ts` = [task id]) | two-way; add with `--private --subtask`, complete or rename with the subtask's own id, delete the subtask reminder to remove one. Shape verified below. |
+| rich link (`url`) | a bare URL as the last line of the notes, after a blank line | see "Links" below |
+| notes (plain text) | notes (Markdown) | see "Notes" below |
+| flagged | the tag titled `flaggedTagTitle` (default "Important") | two-way, see "Flagged" |
+| tags | tags with the same title | two-way set merge, existing Things tags only, see "Tags" |
+| subtasks (title, completed) | checklist items (`ChecklistItem3`) | see "Subtasks and checklists" |
 | priority, urgent, early reminders, alarms other than the due time, location, images, assignee | none | preserved |
-| none | deadline (`dd`), This Evening, checklist notes | preserved |
+| none | deadline (`dd`), This Evening, checklist items when checklist writes are off | preserved |
+
+**Fingerprint.** `notes` is the Things notes as last written or seen (trimmed). New optional fields: `remindersNotes` (the
+reminder's notes), `url`, `flagged`, `tags` (agreed titles) and `checklist` (agreed title and done pairs). Old state files decode with
+them absent, and a missing field reads as "never synced", never as "was removed". Fingerprints are seeded from what was read
+back after a write, and a write that did not take (RemCTL reports something other than what was sent) keeps the OLD value of
+that field and logs a warning, so the next pass retries it (lessons from Remindian issues #74, #75 and #99). A field never
+gets a synthesized value written over user-written text: Reminders is only ever rewritten with the rendering of a changed
+Things note, and Things only with text the user edited in Reminders (or with the reminder's link line).
+
+**Links.** The two renderings of one note are `Things notes` and `Reminders notes + rich link`.
+- Reminders to Things: Things notes = `NoteFormatting.appendingURL(url, to: notes)` (the line is not added when the URL already
+  appears in the notes).
+- Things to Reminders: `splitTrailingURL` on the Things notes. When the reminder has no link, the trailing URL becomes the rich
+  link (`private` + `url`) and the body (without the line) is the Reminders notes. When it has the same link, the same. When it
+  has a different link, the line stays in the Reminders notes as text. RemCTL can only add a rich link, never replace or clear
+  one ([viticci/remctl#79](https://github.com/viticci/remctl/issues/79)), so the engine never sends `url` for a reminder that has one.
+- A link changed in Reminders replaces the old link line in Things (or is appended when the old one is not the last line);
+  the Markdown of the note is left alone. A link that disappears from Reminders removes the line.
+- Both sides in sync when each is the rendering of the other, so there is no ping-pong.
+- Upgrade: links saved before this change have no `remindersNotes`. Their shared notes are the baseline; a reminder whose link
+  already appears in the Things notes is in sync, one whose link is missing from Things gets it appended once.
+
+**Notes.** Things is authoritative for Markdown. Reminders gets `NoteFormatting.plainText(fromMarkdown:)` of the Things body.
+Three-way per side against the fingerprint: if the two notes already render to each other nothing is written (including a
+Markdown-only edit in Things, whose plain text did not change); a Things edit renders to Reminders; only an actual edit of the
+Reminders notes replaces the Things notes, with that plain text, verbatim. Both edited: the later modification wins and a
+`.warning` is logged. First link: Things keeps its text when both have text, an empty note never replaces a filled one, and the links are united.
+Existing linked items with plain notes render to themselves; items whose Markdown was copied verbatim by older versions stay as
+they are until one side is edited.
+
+**Flagged.** Resolved by title against the existing Things tags; if no tag has that title nothing is synced, nothing is created,
+and one `.info` is logged per full pass. Two-way: the side that differs from the agreed value wins (a missing agreed value reads
+as unflagged, so an upgrade unites flags and removes none). Written with `update --private flagged`.
+
+**Tags.** Only titles that already exist in Things (exact match; this app never creates a tag; titles with a comma are skipped
+because `set_tags` takes one comma-separated string), minus the flagged tag and every tag a tag-mode list owns. Set merge against the
+agreed titles: a title added on a side is added to the other, a title removed from a side is removed from the other, and a
+conflict cannot arise. A Reminders tag with no Things counterpart is preserved and never removed. Reminders is written with
+`--private --set-tags` carrying the full resulting set (or `--clear-tags`).
+
+**Subtasks and checklists.** Items pair by trimmed, case-insensitive title and sync title-to-title (a rename is a delete plus an add), with completion
+(`ss` 3, canceled counts as done). Added on a side: added on the other; agreed before and now missing on a side: removed on the
+other; completion differs: the side that changed wins, first sight completed wins. Things to Reminders (add with `--private --subtasks`,
+complete or delete by the subtask's own id) is always on. Reminders to Things checklist writes (create, complete, delete; rename
+exists in the client) are behind the config flag `syncChecklists` (default off): until the completion and deletion shapes have been
+sampled from the app, the engine writes no checklist item. Checklist items are read from history whatever the flag says. After
+Reminders subtask writes the reminder is re-read and any item that did not take keeps its old fingerprint entry (a failed add never
+turns into a delete in Things). A subtask added from Things is created open, and completed on the next pass.
 
 `ChecklistItem3` as Things 3.24.2 wrote it (three items added with the `things:///add` URL scheme,
 read back from history): `{"tt":"Alpha","ss":0,"sp":null,"ix":-518,"ts":["<task id>"],"lt":false,
 "cd":<now>,"md":<now>,"xx":{"_t":"oo","sn":{}}}`. Items sort by `ix` ascending (the app used -518,
--310, 0 for Alpha, Beta, Gamma). Completion is expected to be `ss` 3 with `sp` like a to-do, and
-removal a `t` 2 tombstone; sample both from the app before the first such write. The parent to-do
+-310, 0 for Alpha, Beta, Gamma). The client writes the same keys (new items get `ix` after the last existing one); completion
+is `ss` 3 with `sp`, and removal a `t` 2 tombstone, both still to be sampled from the app before `syncChecklists` is enabled. The validator
+checks every checklist key it writes (exactly one parent id in `ts`, `ss` in 0/2/3, finite `ix`, timestamps). The parent to-do
 was written in the same commit as `Task7`, with `md` set on create (so `md` on creates is safe).
-
-Fingerprints are seeded from a re-read of the written item, and a skipped or failed write keeps the
-previous fingerprints (lessons from Remindian issues #74, #75 and #99).
 
 ### Repeating items
 
@@ -198,13 +246,13 @@ groups go to Things. With `syncSections` off, groups are ignored and nothing mov
 - Groceries lists: sections are read (headings mirror the categories) but never written; Things changes to a heading are
   not copied back, and to-dos created there get no section.
 
-Things deadline, tags (other than the mapping tag), priority, flags, subtasks/checklists, and
-attachments are not synced.
+Things deadline and attachments, and Reminders priority, alarms, location, images and assignee, are not synced and are never
+cleared.
 
 ## Link state and conflict rules
 
 Persist a `LinkRecord` per pair: reminder id (+ external id), Things id, mapping id, and the
-**fingerprint** last written to both sides: title, notes, due, completed, completion day. Store
+**fingerprint** last written to both sides: title, notes (plus the reminder's notes and link), due, completed, completion day, group, tags, flag and checklist. Store
 state as JSON under `~/Library/Application Support/ThingsRemindersSync/` (config.json, links.json,
 log.json), written atomically.
 

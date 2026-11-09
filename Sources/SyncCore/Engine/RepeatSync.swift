@@ -177,13 +177,17 @@ extension SyncPass {
         }
         do {
             var linked = r
+            var actual: ReminderItem?
             if case .some(let group) = plan.thingsGroup { plan.thingsPatch.placement = try await placement(forGroup: group, in: m) }
             if !plan.reminderPatch.isEmpty {
                 linked = try await reminders.update(id: r.id, patch: plan.reminderPatch)
+                actual = linked
                 if let wanted = plan.reminderPatch.section {
                     reconcileSection(&plan.fingerprint, wanted: wanted, actual: linked.section, title: r.title)
                 }
             }
+            let afterwards = try await runSubtaskWrites(plan, reminder: linked.id, listId: linked.listId)
+            settle(&plan, actual: actual, afterwards: afterwards, title: r.title)
             if !plan.thingsPatch.isEmpty { try await things.updateTodo(id: t.id, patch: plan.thingsPatch) }
             store.links.append(LinkRecord(reminderId: linked.id, reminderExternalId: linked.externalId ?? r.externalId, thingsId: t.id,
                                           mappingId: m.id, fingerprint: plan.fingerprint, repeatMode: .template))
@@ -217,10 +221,12 @@ extension SyncPass {
         let group = sectionsActive(m) ? Fingerprint.cleanGroup(r.section) : nil
         do {
             let (placement, tags) = try await thingsPlacement(for: m, group: group)
-            var fp = Fingerprint(reminder: r, days: days, group: group)
+            let fields = thingsFields(from: r)
+            let allTags = tags + fields.tagIds.filter { !tags.contains($0) }
+            var fp = fingerprint(forNewThingsFrom: r, group: group, fields: fields)
             if let rule = r.recurrence, let due = r.due, ThingsRepeat.rr(for: rule, start: due.day) != nil {
-                let id = try await things.createTodo(ThingsTodoDraft(title: r.title, notes: r.notes, when: due, placement: placement,
-                                                                     tagIds: tags, recurrence: rule))
+                let id = try await things.createTodo(ThingsTodoDraft(title: r.title, notes: fields.notes, when: due, placement: placement,
+                                                                     tagIds: allTags, recurrence: rule, checklist: fields.checklist))
                 fp.rule = rule
                 store.links.append(LinkRecord(reminderId: r.id, reminderExternalId: r.externalId, thingsId: id, mappingId: m.id,
                                               fingerprint: fp, copySide: .things, repeatMode: .template))
@@ -228,7 +234,8 @@ extension SyncPass {
                 log(.change, "Created repeating Things to-do \"\(r.title)\" from list \"\(m.listTitle)\"")
             } else {
                 log(.info, "\"\(r.title)\" repeats in Reminders in a way Things cannot hold; Things gets a plain to-do for the current occurrence")
-                let id = try await things.createTodo(ThingsTodoDraft(title: r.title, notes: r.notes, when: r.due, placement: placement, tagIds: tags))
+                let id = try await things.createTodo(ThingsTodoDraft(title: r.title, notes: fields.notes, when: r.due, placement: placement,
+                                                                     tagIds: allTags, checklist: fields.checklist))
                 store.links.append(LinkRecord(reminderId: r.id, reminderExternalId: r.externalId, thingsId: id, mappingId: m.id,
                                               fingerprint: fp, copySide: .things, repeatMode: .reminderRepeats))
                 report.createdInThings += 1
@@ -246,10 +253,11 @@ extension SyncPass {
         let group = sectionsActive(m) ? thingsGroup(t, m) : nil
         let wanted = groceryLists.contains(m.id) ? nil : group
         do {
-            let r = try await reminders.create(title: t.title, notes: t.notes, due: due, completed: false, completionDate: nil,
-                                               listId: m.id, section: wanted, recurrence: rule)
-            var fp = Fingerprint(title: Fingerprint.normalize(t.title), notes: Fingerprint.normalize(t.notes), due: r.due ?? due,
-                                 completed: false, completionDay: nil, group: group, rule: rule)
+            let (r, copied) = try await createReminderCopy(from: t, mapping: m, due: due, completed: false, completionDate: nil,
+                                                           section: wanted, recurrence: rule)
+            var fp = copied
+            fp.title = Fingerprint.normalize(t.title); fp.due = r.due ?? due; fp.completed = false; fp.completionDay = nil
+            fp.group = Fingerprint.cleanGroup(group); fp.rule = rule
             if sectionsActive(m) {
                 let actual = Fingerprint.cleanGroup(r.section)
                 if Fingerprint.groupKey(actual) != Fingerprint.groupKey(group) { fp.group = actual }
@@ -294,11 +302,13 @@ extension SyncPass {
         guard let mapping, !r.completed, r.due != nil else { return nil }
         let group = sectionsActive(mapping) ? Fingerprint.cleanGroup(plan.fingerprint.group) : nil
         let (placement, tags) = try await thingsPlacement(for: mapping, group: group)
-        let id = try await things.createTodo(ThingsTodoDraft(title: r.title, notes: r.notes, when: r.due, placement: placement, tagIds: tags))
+        let fields = thingsFields(from: r)
+        let id = try await things.createTodo(ThingsTodoDraft(title: r.title, notes: fields.notes, when: r.due, placement: placement,
+                                                             tagIds: tags + fields.tagIds.filter { !tags.contains($0) }, checklist: fields.checklist))
         store.detachedThingsIds.insert(task.id)
         report.createdInThings += 1
         log(.change, "Created Things to-do \"\(r.title)\" for the next occurrence")
-        var fp = Fingerprint(reminder: r, days: days, group: group)
+        var fp = fingerprint(forNewThingsFrom: r, group: group, fields: fields)
         fp.stuckSection = plan.fingerprint.stuckSection
         return (id, fp)
     }

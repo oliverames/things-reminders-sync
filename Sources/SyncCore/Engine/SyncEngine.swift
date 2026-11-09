@@ -86,6 +86,12 @@ struct MergePlan {
     var reminderAdvances = false
     /// `.reminderRepeats` pairs: replace the plain to-do with a fresh one for the reminder's new due.
     var replaceThings = false
+    /// The stored fingerprint this plan was made against (nil on a first link); a field whose write did not take falls back to it.
+    var base: Fingerprint?
+    /// Subtask completions and deletions (through the subtasks' own ids), run after the reminder update.
+    var subtaskOps: [SubtaskOp] = []
+    /// Checklist keys whose Reminders side was written, verified by a re-read.
+    var checklistTouched: Set<String> = []
 }
 
 /// The two sides' groups for a pair whose mapping syncs sections.
@@ -117,6 +123,7 @@ final class SyncPass {
     var removedLinks: Set<UUID> = []
     var failedMappings: Set<String> = []
     var groceryLists: Set<String> = []
+    var tagEnv = TagEnvironment()
 
     init(engine: SyncEngine, config: SyncConfig, store: LinkStore, scope: SyncScope, force: Bool, backfillLog: [SyncLogEntry]?) {
         things = engine.things; reminders = engine.reminders; days = DayFormatter(timeZone: engine.timeZone)
@@ -145,7 +152,8 @@ final class SyncPass {
         let refresh = try await things.refresh()
         snapshot = refresh.snapshot
         let lists = try await reminders.lists()
-        let items = try await reminders.reminders(inLists: lists.map(\.id))
+        // A subtask is a part of its parent (it syncs as a checklist item), never a to-do of its own.
+        let items = try await reminders.reminders(inLists: lists.map(\.id)).filter { $0.parentId == nil }
         for r in items {
             remindersById[r.id] = r
             if let e = r.externalId { remindersByExternal[e] = r }
@@ -159,6 +167,7 @@ final class SyncPass {
         buildActiveMappings(lists: lists)
         await migrateRetargetedMappings()
         buildThingsScope()
+        buildTagEnvironment()
 
         reattachParkedLinks()
         let linksAtStart = store.links
@@ -548,8 +557,10 @@ final class SyncPass {
             if case .some(let group) = plan.thingsGroup, let m = destination ?? activeById[tm] {
                 plan.thingsPatch.placement = try await placement(forGroup: group, in: m)
             }
+            var actualReminder: ReminderItem?
             if !plan.reminderPatch.isEmpty {
                 let r = try await reminders.update(id: reminder.id, patch: plan.reminderPatch)
+                actualReminder = r
                 if plan.reminderAdvances || plan.replaceThings { advancedReminder = r }
                 updated.reminderId = r.id; updated.reminderExternalId = r.externalId ?? updated.reminderExternalId
                 var rest = plan.reminderPatch
@@ -565,6 +576,9 @@ final class SyncPass {
                     log(.change, "Moved reminder \"\(r.title)\" to the section \"\(name)\"")
                 }
             }
+            let afterwards = try await runSubtaskWrites(plan, reminder: updated.reminderId, listId: actualReminder?.listId ?? reminder.listId)
+            if plan.reminderPatch.isEmpty && !plan.subtaskOps.isEmpty { report.updatedInReminders += 1 }
+            settle(&plan, actual: actualReminder, afterwards: afterwards, title: reminder.title)
             if !plan.thingsPatch.isEmpty {
                 try await things.updateTodo(id: task.id, patch: plan.thingsPatch)
                 report.updatedInThings += 1
@@ -630,10 +644,10 @@ final class SyncPass {
         case .area: patch.placement = .area(target)
         case .heading: patch.placement = .heading(target)
         case .tag:
-            if !task.tagIds.contains(target) { patch.addTagIds = [target] }
+            if !task.tagIds.contains(target) { patch.addTagIds = (patch.addTagIds ?? []) + [target] }
             if let old, old.mode != .tag { patch.placement = .inbox }
         }
-        if !remove.isEmpty { patch.removeTagIds = remove }
+        if !remove.isEmpty { patch.removeTagIds = (patch.removeTagIds ?? []) + remove }
     }
 
     // MARK: Merge
@@ -672,16 +686,6 @@ final class SyncPass {
         switch titleSide {
         case .reminders: plan.thingsPatch.title = r.title; plan.fingerprint.title = rf.title
         case .things: plan.reminderPatch.title = t.title; plan.fingerprint.title = tf.title
-        case nil: break
-        }
-        // Notes
-        let notesSide = decide("notes", equal: rf.notes == tf.notes,
-                               rChanged: base.map { rf.notes != $0.notes } ?? true,
-                               tChanged: base.map { tf.notes != $0.notes } ?? true,
-                               tiebreak: firstLink ? (tf.notes.isEmpty ? .reminders : .things) : nil)
-        switch notesSide {
-        case .reminders: plan.thingsPatch.notes = r.notes; plan.fingerprint.notes = rf.notes
-        case .things: plan.reminderPatch.notes = t.notes; plan.fingerprint.notes = tf.notes
         case nil: break
         }
         // Due date. On first link a missing date never overrides a real one ("no due date" rule).
@@ -745,6 +749,7 @@ final class SyncPass {
                 }
             }
         }
+        mergeFields(into: &plan, base: base, reminder: r, task: t, later: later)
         return plan
     }
 
@@ -810,13 +815,17 @@ final class SyncPass {
         var plan = merge(base: nil, reminder: r, task: t, group: groupInput)
         do {
             var linkedReminder = r
+            var actual: ReminderItem?
             if case .some(let group) = plan.thingsGroup { plan.thingsPatch.placement = try await placement(forGroup: group, in: m) }
             if !plan.reminderPatch.isEmpty {
                 linkedReminder = try await reminders.update(id: r.id, patch: plan.reminderPatch)
+                actual = linkedReminder
                 if let wanted = plan.reminderPatch.section {
                     reconcileSection(&plan.fingerprint, wanted: wanted, actual: linkedReminder.section, title: r.title)
                 }
             }
+            let afterwards = try await runSubtaskWrites(plan, reminder: linkedReminder.id, listId: linkedReminder.listId)
+            settle(&plan, actual: actual, afterwards: afterwards, title: r.title)
             if !plan.thingsPatch.isEmpty { try await things.updateTodo(id: t.id, patch: plan.thingsPatch) }
             store.links.append(LinkRecord(reminderId: linkedReminder.id, reminderExternalId: linkedReminder.externalId ?? r.externalId,
                                           thingsId: t.id, mappingId: m.id, fingerprint: plan.fingerprint))
@@ -840,11 +849,13 @@ final class SyncPass {
         }
         do {
             if let group { placement = try await self.placement(forGroup: group, in: m) }
-            let draft = ThingsTodoDraft(title: r.title, notes: r.notes, when: r.due, completed: r.completed,
-                                        completionDate: r.completionDate, placement: placement, tagIds: tags)
+            let fields = thingsFields(from: r)
+            let draft = ThingsTodoDraft(title: r.title, notes: fields.notes, when: r.due, completed: r.completed,
+                                        completionDate: r.completionDate, placement: placement,
+                                        tagIds: tags + fields.tagIds.filter { !tags.contains($0) }, checklist: fields.checklist)
             let id = try await things.createTodo(draft)
             store.links.append(LinkRecord(reminderId: r.id, reminderExternalId: r.externalId, thingsId: id, mappingId: m.id,
-                                          fingerprint: Fingerprint(reminder: r, days: days, group: group),
+                                          fingerprint: fingerprint(forNewThingsFrom: r, group: group, fields: fields),
                                           copySide: .things, copiedCompleted: r.completed))
             report.createdInThings += 1
             log(.change, "Created Things to-do \"\(r.title)\" from list \"\(m.listTitle)\"")
@@ -863,9 +874,10 @@ final class SyncPass {
         let group = active ? thingsGroup(t, m) : nil
         let wanted = groceryLists.contains(m.id) ? nil : group
         do {
-            let r = try await reminders.create(title: t.title, notes: t.notes, due: t.due, completed: done,
-                                               completionDate: done ? t.stopDate : nil, listId: m.id, section: wanted)
-            var fingerprint = Fingerprint(things: t, days: days, group: group)
+            let (r, copied) = try await createReminderCopy(from: t, mapping: m, due: t.due, completed: done,
+                                                           completionDate: done ? t.stopDate : nil, section: wanted)
+            var fingerprint = copied
+            fingerprint.group = Fingerprint.cleanGroup(group)
             if active {
                 // Record the section the reminder really has: a section that did not take (or a grocery
                 // category) must not look like a later change on the Reminders side.

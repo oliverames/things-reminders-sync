@@ -7,6 +7,9 @@ import Foundation
 /// guard falls out of it: after a write the stored fingerprint is the written one, so the echo is a no-op).
 public struct Fingerprint: Codable, Hashable, Sendable {
     public var title: String
+    /// The notes of the Things to-do as last written or seen (trimmed). With `remindersNotes` and `url` below this is
+    /// the notes triple: Things holds Markdown plus an optional trailing link line, Reminders holds plain notes plus a
+    /// rich link, and the two are different renderings of one text (see `NoteFormatting` and docs/SPEC.md).
     public var notes: String
     public var due: DueDate?
     public var completed: Bool
@@ -21,12 +24,32 @@ public struct Fingerprint: Codable, Hashable, Sendable {
     /// For a repeating pair: the rule both sides last agreed on (compared through `RepeatRule.key`). Nil for plain
     /// pairs, and for a repeating pair whose rule cannot be synced. Links saved before repeating sync decode it as nil.
     public var rule: RepeatRule?
+    /// The reminder's notes (trimmed) as last written or seen. Nil on links saved before field fidelity: both sides'
+    /// notes were then equal to `notes`, and `url` is unknown (see `SyncPass.decideNotes`).
+    public var remindersNotes: String?
+    /// The reminder's rich link as last written or seen; meaningful only when `remindersNotes` is set.
+    public var url: String?
+    /// Flagged state both sides agreed on (Things: carries the flagged tag). Nil: never synced, read as not flagged.
+    public var flagged: Bool?
+    /// Titles of the tags both sides agreed on (only tags that exist in Things). Nil: never synced, read as none.
+    public var tags: [String]?
+    /// Subtasks / checklist items both sides agreed on. Nil: never synced, read as none.
+    public var checklist: [ChecklistEntry]?
+
+    public struct ChecklistEntry: Codable, Hashable, Sendable {
+        public var title: String
+        public var done: Bool
+        public init(title: String, done: Bool) { self.title = title; self.done = done }
+    }
 
     public init(title: String, notes: String, due: DueDate?, completed: Bool, completionDay: String?,
-                group: String? = nil, stuckSection: String? = nil, rule: RepeatRule? = nil) {
+                group: String? = nil, stuckSection: String? = nil, rule: RepeatRule? = nil,
+                remindersNotes: String? = nil, url: String? = nil, flagged: Bool? = nil, tags: [String]? = nil,
+                checklist: [ChecklistEntry]? = nil) {
         self.title = title; self.notes = notes; self.due = due
         self.completed = completed; self.completionDay = completionDay
         self.group = group; self.stuckSection = stuckSection; self.rule = rule
+        self.remindersNotes = remindersNotes; self.url = url; self.flagged = flagged; self.tags = tags; self.checklist = checklist
     }
 
     static func normalize(_ text: String) -> String { text.trimmingCharacters(in: .whitespacesAndNewlines) }

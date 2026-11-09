@@ -358,7 +358,7 @@ private func projectWorld() async -> World {
     try await w.sync()
     #expect(await w.things.task("t1")?.notes == "**Bring** the referral")
     #expect(await w.things.task("t1")?.title == "Call Dr. Lee")
-    #expect(await w.reminders.item("r1")?.notes == "**Bring** the referral")
+    #expect(await w.reminders.item("r1")?.notes == "Bring the referral")   // Reminders shows the plain rendering
     #expect(await w.reminders.item("r1")?.title == "Call Dr. Lee")
     #expect(await w.things.task("t2")?.notes == "Portal login in 1Password")
 }

@@ -4,6 +4,7 @@ enum ThingsEntity {
     static let task = "Task6"
     static let area = "Area3"
     static let tag = "Tag4"
+    static let checklistItem = "ChecklistItem3"
 }
 
 // MARK: - Calendar days
@@ -123,6 +124,24 @@ enum ThingsChanges {
         }
         return ["st": 2, "sb": 0, "sr": nil, "tir": .number(ts), "icsd": .number(ts), "ato": ato]
     }
+
+    /// `ChecklistItem3` exactly as Things 3.24.2 writes one (docs/SPEC.md): `ts` is the parent task, items sort by `ix`.
+    /// Completion is `ss` 3 with `sp`, like a to-do.
+    static func checklistCreate(taskId: String, title: String, completed: Bool, index: Double, now: Date) -> ThingsChange {
+        let nowTs = now.timeIntervalSince1970
+        return ThingsChange(t: 0, e: ThingsEntity.checklistItem, p: [
+            "tt": .string(title), "ss": completed ? 3 : 0, "sp": completed ? .number(nowTs) : .null, "ix": .number(index),
+            "ts": idArray([taskId]), "lt": false, "cd": .number(nowTs), "md": .number(nowTs), "xx": emptyXX,
+        ])
+    }
+
+    static func checklistUpdate(_ p: [String: JSONValue], now: Date) -> ThingsChange {
+        var p = p
+        p["md"] = .number(now.timeIntervalSince1970)
+        return ThingsChange(t: 1, e: ThingsEntity.checklistItem, p: p)
+    }
+
+    static func checklistDelete() -> ThingsChange { ThingsChange(t: 2, e: ThingsEntity.checklistItem, p: [:]) }
 
     static func areaCreate(title: String) -> ThingsChange {
         ThingsChange(t: 0, e: ThingsEntity.area, p: ["tt": .string(title), "tg": [], "ix": 0, "xx": emptyXX])

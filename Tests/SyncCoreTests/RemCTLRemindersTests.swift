@@ -73,6 +73,18 @@ actor FakeRemCTL: RemCTLTransport {
         case "update_reminder":
             let id = arguments["reminder_id"]!.int!
             if let t = arguments["title"] { edit(id, "title", t) }
+            if let n = arguments["notes"] { edit(id, "notes", n) }
+            // Private metadata: only honoured with `private: true`, like RemCTL (without it a url would land in the notes).
+            if arguments["private"] == true {
+                if let u = arguments["url"] { edit(id, "url", u) }
+                if let f = arguments["flagged"] { edit(id, "flagged", f) }
+                if let tags = arguments["set_tags"]?.string { edit(id, "tags", .array(tags.split(separator: ",").map { .string(String($0)) })) }
+                if arguments["clear_tags"] == true { edit(id, "tags", []) }
+                for title in arguments["subtasks"]?.array?.compactMap(\.string) ?? [] {
+                    nextId += 1
+                    put(Self.row(nextId, title, list: rows[id]?["list"]?.string ?? "Work", ["isSubtask": true, "parentID": .number(Double(id))]))
+                }
+            }
             if let l = arguments["list_id"]?.int, let title = lists.first(where: { $0["id"]?.int == l })?["title"] { edit(id, "list", title) }
             applySection(id, arguments, list: nil)
             return ["status": "updated", "id": .number(Double(id))]
