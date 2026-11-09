@@ -15,7 +15,7 @@ struct ThingsRemindersSyncApp: App {
         MenuBarExtra {
             MenuContent(coordinator: coordinator)
         } label: {
-            Image(systemName: coordinator.phase.menuBarSymbol)
+            Image(nsImage: MenuBarIcon.image(for: coordinator.phase.menuBarIconState))
         }
         .menuBarExtraStyle(.menu)
 
@@ -26,15 +26,16 @@ struct ThingsRemindersSyncApp: App {
 }
 
 extension SyncCoordinator.Phase {
-    var menuBarSymbol: String {
+    var menuBarIconState: MenuBarIconState {
         switch self {
-        case .needsSetup: "arrow.triangle.2.circlepath.circle"
-        case .idle: "arrow.triangle.2.circlepath"
-        case .syncing: "arrow.trianglehead.2.clockwise.rotate.90.circle.fill"
-        case .paused: "pause.circle"
-        case .error: "exclamationmark.triangle"
+        case .needsSetup: .needsSetup
+        case .idle: .idle
+        case .syncing: .syncing
+        case .paused: .paused
+        case .error: .error
         }
     }
+
 
     var statusText: String {
         switch self {
