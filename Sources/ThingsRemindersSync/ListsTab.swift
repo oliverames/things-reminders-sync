@@ -52,23 +52,48 @@ private struct ListRow: View {
     private static let newTag = "__new__"
     private static let chooseTag = "__choose__"
     @State private var creatingNew = false
+    /// Unsaved edits. Nothing reaches the sync engine until Save.
+    @State private var draft: ListMapping?
+    /// The saved mapping the draft started from, for a field-wise merge on Save.
+    @State private var draftBase: ListMapping?
+    @State private var saving = false
 
-    private var mapping: ListMapping? { coordinator.config.mappings.first { $0.id == list.id } }
-    private var current: ListMapping {
-        mapping ?? ListMapping(id: list.id, listTitle: list.title, enabled: false, targetTitle: list.title)
+    private var saved: ListMapping {
+        coordinator.config.mappings.first { $0.id == list.id }
+            ?? ListMapping(id: list.id, listTitle: list.title, enabled: false, targetTitle: list.title)
     }
+    private var current: ListMapping { draft ?? saved }
+    private var isDirty: Bool { draft != nil && draft != saved }
 
     private func edit(_ change: (inout ListMapping) -> Void) {
+        if draft == nil { draft = saved; draftBase = saved }
+        draft!.listTitle = list.title
+        change(&draft!)
+    }
+
+    private func revert() { draft = nil; draftBase = nil; creatingNew = false }
+
+    private func save() {
+        guard var updated = draft else { return }
+        let latest = saved
+        // The app may have filled in a target id (a project it created) since the draft began;
+        // keep it unless the user changed the target in this draft.
+        if let base = draftBase, updated.targetId == base.targetId, updated.mode == base.mode,
+           updated.awaitingTarget == base.awaitingTarget {
+            updated.targetId = latest.targetId
+        }
         var config = coordinator.config
-        var updated = current
-        updated.listTitle = list.title
-        change(&updated)
         if let index = config.mappings.firstIndex(where: { $0.id == list.id }) {
             config.mappings[index] = updated
         } else {
             config.mappings.append(updated)
         }
-        Task { await coordinator.updateConfig(config) }
+        saving = true
+        Task {
+            await coordinator.updateConfig(config)
+            saving = false
+            revert()
+        }
     }
 
     private var targets: [(id: String, title: String)] {
@@ -123,7 +148,7 @@ private struct ListRow: View {
             }, set: { value in
                 switch value {
                 case Self.chooseTag: return
-                case Self.newTag: creatingNew = true      // created only when "Create" is pressed
+                case Self.newTag: creatingNew = true; edit { $0.targetId = nil; $0.awaitingTarget = false }   // created on Save
                 default: creatingNew = false; edit { $0.targetId = value; $0.awaitingTarget = false }
                 }
             })) {
@@ -140,12 +165,6 @@ private struct ListRow: View {
                                 areas: coordinator.thingsAreas,
                                 onTitle: { value in edit { $0.targetTitle = value } },
                                 onArea: { value in edit { $0.projectAreaId = value } })
-                if current.awaitingTarget {
-                    Button("Create \(current.mode.rawValue.capitalized) \"\(current.targetTitle)\"") {
-                        creatingNew = false
-                        edit { $0.awaitingTarget = false }
-                    }
-                }
             }
             LabeledContent("Linked items", value: "\(coordinator.linkedCounts[list.id] ?? 0)")
             if current.mode == .tag {
@@ -153,6 +172,25 @@ private struct ListRow: View {
                     .font(.callout).foregroundStyle(.secondary)
             }
         }
+        if isDirty {
+            HStack {
+                Label(saveSummary, systemImage: "pencil.circle").font(.callout).foregroundStyle(.secondary)
+                Spacer()
+                Button("Revert", action: revert).disabled(saving)
+                Button(saving ? "Saving…" : "Save", action: save)
+                    .buttonStyle(.borderedProminent).disabled(saving)
+            }
+        }
+    }
+
+    private var saveSummary: String {
+        guard let draft else { return "" }
+        if !draft.enabled { return saved.enabled ? "Stops syncing this list" : "Unsaved changes" }
+        if !saved.enabled { return draft.targetId == nil && !draft.awaitingTarget ? "Starts syncing; creates \"\(draft.targetTitle)\"" : "Starts syncing this list" }
+        if draft.mode != saved.mode || draft.targetId != saved.targetId {
+            return draft.awaitingTarget && draft.targetId == nil ? "Pauses until a target is chosen" : "Moves linked to-dos to the new target"
+        }
+        return "Unsaved changes"
     }
 
     private func existingTarget(named title: String, mode: MappingMode) -> String? {

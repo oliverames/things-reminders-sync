@@ -5,8 +5,14 @@ import SyncCore
 struct OptionsTab: View {
     let coordinator: SyncCoordinator
     @State private var draft = SyncConfig()
-    @State private var loaded = false
-    @State private var commitTask: Task<Void, Never>?
+    @State private var saving = false
+
+    /// Only the option fields; list mappings are edited on the Lists tab.
+    private static func options(_ c: SyncConfig) -> [Int] {
+        [c.pollSeconds, c.remindersPollSeconds, c.reconcileMinutes,
+         c.includeCompletedOnFirstLink ? 1 : 0, c.propagateDeletes ? 1 : 0]
+    }
+    private var isDirty: Bool { Self.options(draft) != Self.options(coordinator.config) }
 
     var body: some View {
         Form {
@@ -30,31 +36,34 @@ struct OptionsTab: View {
             Section("General") {
                 LoginItemRow()
             }
+            if isDirty {
+                Section {
+                    HStack {
+                        Label("Unsaved changes", systemImage: "pencil.circle").font(.callout).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Revert") { draft = coordinator.config }.disabled(saving)
+                        Button(saving ? "Saving…" : "Save", action: save).buttonStyle(.borderedProminent).disabled(saving)
+                    }
+                }
+            }
         }
         .formStyle(.grouped)
-        .onAppear { draft = coordinator.config; loaded = true }
-        .onChange(of: draft) { _, new in scheduleCommit(new) }
-        .onChange(of: coordinator.config) { _, new in
-            // Pick up outside changes (such as list edits) without echoing them back.
-            if new != draft { loaded = false; draft = new; loaded = true }
+        .onAppear { draft = coordinator.config }
+        .onChange(of: coordinator.config) { old, new in
+            // Follow outside changes, but never discard edits the user has not saved yet.
+            if Self.options(draft) == Self.options(old) { draft = new }
         }
     }
 
-    /// Debounced so holding a stepper does not start a sync per tick.
-    private func scheduleCommit(_ new: SyncConfig) {
-        guard loaded, new != coordinator.config else { return }
-        commitTask?.cancel()
-        commitTask = Task {
-            try? await Task.sleep(for: .milliseconds(800))
-            guard !Task.isCancelled else { return }
-            var merged = coordinator.config
-            merged.pollSeconds = new.pollSeconds
-            merged.remindersPollSeconds = new.remindersPollSeconds
-            merged.reconcileMinutes = new.reconcileMinutes
-            merged.includeCompletedOnFirstLink = new.includeCompletedOnFirstLink
-            merged.propagateDeletes = new.propagateDeletes
-            await coordinator.updateConfig(merged)
-        }
+    private func save() {
+        var merged = coordinator.config
+        merged.pollSeconds = draft.pollSeconds
+        merged.remindersPollSeconds = draft.remindersPollSeconds
+        merged.reconcileMinutes = draft.reconcileMinutes
+        merged.includeCompletedOnFirstLink = draft.includeCompletedOnFirstLink
+        merged.propagateDeletes = draft.propagateDeletes
+        saving = true
+        Task { await coordinator.updateConfig(merged); saving = false }
     }
 }
 
