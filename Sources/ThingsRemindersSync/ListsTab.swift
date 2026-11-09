@@ -79,7 +79,7 @@ private struct ListRow: View {
         // The app may have filled in a target id (a project it created) since the draft began;
         // keep it unless the user changed the target in this draft.
         if let base = draftBase, updated.targetId == base.targetId, updated.mode == base.mode,
-           updated.awaitingTarget == base.awaitingTarget {
+           updated.awaitingTarget == base.awaitingTarget, updated.parentProjectId == base.parentProjectId {
             updated.targetId = latest.targetId
         }
         var config = coordinator.config
@@ -101,7 +101,15 @@ private struct ListRow: View {
         case .project: coordinator.thingsProjects.map { ($0.id, $0.title) }.sorted { $0.1.localizedCaseInsensitiveCompare($1.1) == .orderedAscending }
         case .area: coordinator.thingsAreas.map { ($0.id, $0.title) }.sorted { $0.1.localizedCaseInsensitiveCompare($1.1) == .orderedAscending }
         case .tag: coordinator.thingsTags.map { ($0.id, $0.title) }.sorted { $0.1.localizedCaseInsensitiveCompare($1.1) == .orderedAscending }
+        case .heading: headings(in: current.parentProjectId).map { ($0.id, $0.title) }
         }
+    }
+
+    /// Headings of one project, alphabetical. None until a project is chosen.
+    private func headings(in projectId: String?) -> [ThingsTask] {
+        guard let projectId else { return [] }
+        return coordinator.thingsHeadings.filter { $0.projectId == projectId }
+            .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
     }
 
     var body: some View {
@@ -109,8 +117,12 @@ private struct ListRow: View {
             edit {
                 $0.enabled = value
                 // Turning a list on reuses an existing Things target with the list's name before creating one.
-                if value, $0.targetId == nil, !$0.awaitingTarget, let match = existingTarget(named: list.title, mode: $0.mode) {
-                    $0.targetId = match
+                if value, $0.targetId == nil, !$0.awaitingTarget {
+                    if let match = existingTarget(named: list.title, mode: $0.mode, projectId: $0.parentProjectId) {
+                        $0.targetId = match
+                    } else if $0.mode == .heading && $0.parentProjectId == nil {
+                        $0.awaitingTarget = true   // a heading needs a project first
+                    }
                 }
             }
         })) {
@@ -132,31 +144,50 @@ private struct ListRow: View {
                 creatingNew = false
                 // Never create anything on a mode change: pick a same-named target if one exists,
                 // otherwise pause the list until a target is chosen. Linked to-dos move on the next sync.
-                let match = existingTarget(named: list.title, mode: mode)
+                let match = existingTarget(named: list.title, mode: mode, projectId: nil)
                 edit {
                     $0.mode = mode; $0.targetId = match; $0.targetTitle = list.title; $0.projectAreaId = nil
+                    $0.parentProjectId = nil   // a heading's project is chosen again below
                     $0.awaitingTarget = match == nil
                 }
             })) {
                 Text("Project").tag(MappingMode.project)
                 Text("Area").tag(MappingMode.area)
                 Text("Tag").tag(MappingMode.tag)
+                Text("Heading").tag(MappingMode.heading)
             }
-            Picker(targetLabel, selection: Binding(get: {
-                if let id = current.targetId { return id }
-                return current.awaitingTarget && !creatingNew ? Self.chooseTag : Self.newTag
-            }, set: { value in
-                switch value {
-                case Self.chooseTag: return
-                case Self.newTag: creatingNew = true; edit { $0.targetId = nil; $0.awaitingTarget = false }   // created on Save
-                default: creatingNew = false; edit { $0.targetId = value; $0.awaitingTarget = false }
+            if current.mode == .heading {
+                Picker("Project", selection: Binding(get: { current.parentProjectId ?? Self.chooseTag }, set: { value in
+                    guard value != Self.chooseTag, value != current.parentProjectId else { return }
+                    creatingNew = false
+                    // Changing the project resets the heading: reuse a same-named heading there, else wait for a choice.
+                    let match = existingTarget(named: list.title, mode: .heading, projectId: value)
+                    edit { $0.parentProjectId = value; $0.targetId = match; $0.targetTitle = list.title; $0.awaitingTarget = match == nil }
+                })) {
+                    if current.parentProjectId == nil { Text("Choose…").tag(Self.chooseTag) }
+                    ForEach(coordinator.thingsProjects) { Text($0.title).tag($0.id) }
                 }
-            })) {
-                if current.awaitingTarget && current.targetId == nil && !creatingNew { Text("Choose…").tag(Self.chooseTag) }
-                ForEach(targets, id: \.id) { Text($0.title).tag($0.id) }
-                Text("New…").tag(Self.newTag)
             }
-            if current.awaitingTarget && current.targetId == nil && !creatingNew {
+            if current.mode != .heading || current.parentProjectId != nil {
+                Picker(targetLabel, selection: Binding(get: {
+                    if let id = current.targetId { return id }
+                    return current.awaitingTarget && !creatingNew ? Self.chooseTag : Self.newTag
+                }, set: { value in
+                    switch value {
+                    case Self.chooseTag: return
+                    case Self.newTag: creatingNew = true; edit { $0.targetId = nil; $0.awaitingTarget = false }   // created on Save
+                    default: creatingNew = false; edit { $0.targetId = value; $0.awaitingTarget = false }
+                    }
+                })) {
+                    if current.awaitingTarget && current.targetId == nil && !creatingNew { Text("Choose…").tag(Self.chooseTag) }
+                    ForEach(targets, id: \.id) { Text($0.title).tag($0.id) }
+                    Text("New…").tag(Self.newTag)
+                }
+            }
+            if current.mode == .heading && current.parentProjectId == nil {
+                Text("Choose the Things project that holds the heading. Syncing for this list is paused until you choose a heading.")
+                    .font(.callout).foregroundStyle(.secondary)
+            } else if current.awaitingTarget && current.targetId == nil && !creatingNew {
                 Text("Syncing for this list is paused until you choose a Things \(current.mode.rawValue). Linked to-dos move there on the next sync.")
                     .font(.callout).foregroundStyle(.secondary)
             }
@@ -169,6 +200,13 @@ private struct ListRow: View {
             LabeledContent("Linked items", value: "\(coordinator.linkedCounts[list.id] ?? 0)")
             if current.mode == .tag {
                 Text("New items from this list land in the Things Inbox with the tag.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            if current.mode == .project {
+                Toggle("Sync sections as headings", isOn: Binding(get: { current.syncSections }, set: { value in edit { $0.syncSections = value } }))
+            }
+            if current.mode == .heading {
+                Text("The list mirrors the to-dos under this heading. Sections are not synced.")
                     .font(.callout).foregroundStyle(.secondary)
             }
         }
@@ -187,18 +225,20 @@ private struct ListRow: View {
         guard let draft else { return "" }
         if !draft.enabled { return saved.enabled ? "Stops syncing this list" : "Unsaved changes" }
         if !saved.enabled { return draft.targetId == nil && !draft.awaitingTarget ? "Starts syncing; creates \"\(draft.targetTitle)\"" : "Starts syncing this list" }
-        if draft.mode != saved.mode || draft.targetId != saved.targetId {
+        if draft.mode != saved.mode || draft.targetId != saved.targetId || draft.parentProjectId != saved.parentProjectId {
             return draft.awaitingTarget && draft.targetId == nil ? "Pauses until a target is chosen" : "Moves linked to-dos to the new target"
         }
         return "Unsaved changes"
     }
 
-    private func existingTarget(named title: String, mode: MappingMode) -> String? {
+    /// The one existing target with the list's name. Headings match only inside the chosen project.
+    private func existingTarget(named title: String, mode: MappingMode, projectId: String?) -> String? {
         let wanted = title.trimmingCharacters(in: .whitespaces).lowercased()
         let candidates: [(id: String, title: String)] = switch mode {
         case .project: coordinator.thingsProjects.map { ($0.id, $0.title) }
         case .area: coordinator.thingsAreas.map { ($0.id, $0.title) }
         case .tag: coordinator.thingsTags.map { ($0.id, $0.title) }
+        case .heading: headings(in: projectId).map { ($0.id, $0.title) }
         }
         let hits = candidates.filter { $0.title.trimmingCharacters(in: .whitespaces).lowercased() == wanted }
         return hits.count == 1 ? hits[0].id : nil
@@ -209,6 +249,7 @@ private struct ListRow: View {
         case .project: "Things project"
         case .area: "Things area"
         case .tag: "Things tag"
+        case .heading: "Things heading"
         }
     }
 }

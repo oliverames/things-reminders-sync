@@ -31,7 +31,7 @@ Capability Host authorized for Reminders; the app needs no Reminders permission 
 
 - Transport: one long-lived `remctl mcp serve` child (JSON-RPC lines on stdio, handshake once, requests
   serialized, 30 s timeout, restart once on EOF/crash/timeout, stderr drained). Tools used: `lists`,
-  `create_reminder`, `update_reminder`, `set_completion`, `delete_reminder`, `get_reminder`.
+  `create_reminder`, `update_reminder`, `set_completion`, `delete_reminder`, `get_reminder`, `get_list` (section names).
 - Reads: `remctl export --json` as a one-shot process, because MCP tool results are capped (about 170 KB,
   which cuts the export to roughly a third of the rows). List titles in rows map to list ids through
   the latest `lists` result; rows in lists whose title is shared by several lists are skipped and logged.
@@ -40,6 +40,14 @@ Capability Host authorized for Reminders; the app needs no Reminders permission 
   is written with an `alarm` at the same instant (mirroring the Things reminder); clearing a due also
   clears the alarm. Any `recurrence` means repeating (not synced). Completion uses `set_completion`,
   omitting `completion_date` for repeating reminders.
+- Sections: `remctl export --json` rows carry no `section` (checked against RemCTL 2.5.0); `get_reminder` and
+  `remctl show --list-id N --completed --json` do. So for the lists registered with
+  `RemCTLReminders.setSectionLists` (enabled project-mode mappings with `syncSections`) every read and poll also runs one
+  `show` per such list, and a failed `show` fails the read (a pass must never mistake "could not read" for "no section").
+  Writes use `private: true` with `section` (an existing section of the list, matched case-insensitively against
+  `get_list`, cached for one pass or poll; `section_id` when several share the name) or `new_section`. After a list move
+  (which can copy the reminder and return a new id plus `oldId`) the section is written with a second call on the id
+  the move returned. Lists with `isGroceries` (from `lists`) auto-categorize: their sections are read but never written.
 - Access: `access()` is `.granted` when the MCP session starts and `lists` succeeds, otherwise `.denied`
   with RemCTL's message in `SyncCoordinator.remindersDetail`.
 
@@ -88,13 +96,18 @@ Each enabled `ListMapping` links one Reminders list to one Things target:
 
 | Mode | Things items in scope | New Reminders item becomes |
 |---|---|---|
-| `project` | open-or-done to-dos whose project is the target (directly or via a heading) | to-do in that project |
+| `project` | open-or-done to-dos whose project is the target (directly or via a heading) | to-do in that project (under the heading named like the reminder's section, see Sections and headings) |
+| `heading` | to-dos whose heading is the target (`targetId` is the heading id, `parentProjectId` its project) | to-do under that heading |
 | `area` | to-dos directly in the area (no project) | to-do in that area |
 | `tag` | to-dos carrying the tag, anywhere | Inbox to-do with that tag |
 
-If `targetId` is nil, create the project/area/tag named `targetTitle` (project inside
-`projectAreaId` when set) on the first sync and store the new id back in the config.
-A Things item that matches several mappings belongs to the first one in `config.mappings` order.
+If `targetId` is nil, create the project/area/tag/heading named `targetTitle` (project inside
+`projectAreaId` when set; a heading inside `parentProjectId`, and with no `parentProjectId` the mapping is skipped
+with a warning) on the first sync and store the new id back in the config.
+A Things item that matches several mappings belongs to the first one in `config.mappings` order, except that heading
+mappings are tried before every other mode, so a to-do under a mapped heading is never also claimed by a project
+mapping of the same project, wherever that mapping is listed. Several lists may map to different headings of one project.
+A heading target exists while it is a non-trashed task of kind heading. Sections are ignored in heading mode.
 Only to-dos sync: never projects, headings, checklist items, or repeating to-dos (`isRepeating`
 either side). Things items that are trashed are out of scope except as deletions of linked pairs.
 
@@ -111,6 +124,31 @@ either side). Things items that are trashed are out of scope except as deletions
 | not completed | `ss 0`, `sp` null |
 | (Things canceled) | completed in Reminders |
 | list | placement per the mapping (moving between mapped lists moves between targets, and back) |
+| section (project mode, `syncSections`) | heading title of the to-do in the target project |
+
+### Sections and headings
+
+Things headings only exist inside projects. A `project` mapping with `syncSections` (default true) mirrors
+structure: the reminder's **section** and the to-do's **heading**. The to-do's group is the title of its heading when
+that heading is in the target project and not trashed, else none (directly in the project). The reminder's group is its
+section. Groups compare trimmed and case-insensitively; writes keep the original spelling. The group is part of the
+link fingerprint (`group`; links saved before it existed decode it as none) and merges like any field: one side changed
+since the base, copy; both changed, the later modification wins. On first link a group beats none, and two different
+groups go to Things. With `syncSections` off, groups are ignored and nothing moves between headings or sections.
+
+- To Things: no group places the to-do directly in the project; a group places it under the existing heading of that name
+  in the project (oldest first when duplicated) or a heading created on the spot (one per name per pass).
+- To Reminders: the section is assigned, or created when the list has none of that name.
+- New partners follow: a reminder in section X becomes a to-do under heading X, and the reverse. Moving a linked pair to
+  another project-mode list carries the group into the new list, and so does retargeting a mapping to another project.
+- **Limitation: RemCTL 2.5.0 cannot remove a reminder from a section.** `section: ""` is ignored ("nothing to update"),
+  there is no clear flag, and the CLI has no unsection command (only deleting the whole section, which this app never
+  does). When a heading is removed in Things, the reminder stays in its section; the fingerprint stores the Things side
+  (no group) plus `stuckSection` (the section the reminder cannot leave), so the reminder still reading that section is
+  not seen as a change and nothing loops or moves the to-do back. One `.info` per item is logged. A later section change
+  on either side flows normally. A section write that did not take is recorded as it is, so the next pass retries it.
+- Groceries lists: sections are read (headings mirror the categories) but never written; Things changes to a heading are
+  not copied back, and to-dos created there get no section.
 
 Things deadline, tags (other than the mapping tag), priority, flags, subtasks/checklists, and
 attachments are not synced.
@@ -151,8 +189,9 @@ Now. Never empty the Things Trash. Never touch Reminders lists that are not mapp
   Settings…, Quit.
 - Settings window tabs: **Account** (Things Cloud email/password, verify, sign out; RemCTL
   status row with a Check Again button and an optional RemCTL path), **Lists** (every Reminders list with an enable toggle, a mode
-  picker, a target picker of existing Things projects/areas/tags plus "New …" with a title, and the
-  linked-item count), **Options** (Things poll interval, Reminders poll interval, reconcile interval, include completed on first
+  picker (Project, Area, Tag, Heading), a target picker of existing Things projects/areas/tags plus "New …" with a title,
+  and the linked-item count; Heading mode picks the project first, then one of its headings or "New …"; Project mode has a
+  "Sync sections as headings" toggle), **Options** (Things poll interval, Reminders poll interval, reconcile interval, include completed on first
   link, propagate deletes, open at login via `SMAppService.mainApp`), **Activity** (log, newest
   first, with levels).
 - Credentials in the Keychain (generic password, service `com.oliverames.ThingsRemindersSync`).

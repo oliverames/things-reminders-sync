@@ -69,6 +69,17 @@ private struct MergePlan {
     var thingsPatch = ThingsTodoPatch()
     var fingerprint: Fingerprint
     var conflicts: [String] = []
+    /// The group (heading) the Things to-do should move to: `.some(nil)` is directly in the project.
+    /// Resolved to a placement (finding or creating the heading) just before the write.
+    var thingsGroup: String??
+}
+
+/// The two sides' groups for a pair whose mapping syncs sections.
+private struct GroupInput {
+    var things: String?
+    var reminders: String?
+    /// Groceries lists categorize themselves: the engine reads their sections but never writes them.
+    var remindersReadOnly: Bool
 }
 
 private final class SyncPass {
@@ -90,6 +101,7 @@ private final class SyncPass {
     var pendingDeletes: [String: [(linkId: UUID, action: PendingDelete, title: String)]] = [:]
     var removedLinks: Set<UUID> = []
     var failedMappings: Set<String> = []
+    var groceryLists: Set<String> = []
 
     init(engine: SyncEngine, config: SyncConfig, store: LinkStore, scope: SyncScope, force: Bool) {
         things = engine.things; reminders = engine.reminders; days = DayFormatter(timeZone: engine.timeZone)
@@ -123,6 +135,7 @@ private final class SyncPass {
             remindersById[r.id] = r
             if let e = r.externalId { remindersByExternal[e] = r }
         }
+        groceryLists = Set(lists.filter(\.isGroceries).map(\.id))
         buildActiveMappings(lists: lists)
         await migrateRetargetedMappings()
         buildThingsScope()
@@ -157,6 +170,12 @@ private final class SyncPass {
                 case .project: id = try await things.createProject(title: m.targetTitle, areaId: m.projectAreaId)
                 case .area: id = try await things.createArea(title: m.targetTitle)
                 case .tag: id = try await things.createTag(title: m.targetTitle, parentId: nil)
+                case .heading:
+                    guard let project = m.parentProjectId else {
+                        log(.warning, "Cannot create the Things heading \"\(m.targetTitle)\" for list \"\(m.listTitle)\": no project is chosen; skipped")
+                        continue
+                    }
+                    id = try await things.createHeading(title: m.targetTitle, projectId: project)
                 }
                 config.mappings[i].targetId = id
                 log(.change, "Created Things \(m.mode.rawValue) \"\(m.targetTitle)\" for list \"\(m.listTitle)\"")
@@ -195,6 +214,7 @@ private final class SyncPass {
         case .project: if let t = snapshot.tasks[id] { return t.kind == .project && !t.trashed } else { return false }
         case .area: return snapshot.areas[id] != nil
         case .tag: return snapshot.tags[id] != nil
+        case .heading: if let t = snapshot.tasks[id] { return t.kind == .heading && !t.trashed } else { return false }
         }
     }
 
@@ -203,7 +223,7 @@ private final class SyncPass {
     func targetName(_ mode: MappingMode, _ id: String?) -> String {
         guard let id else { return "?" }
         switch mode {
-        case .project: return snapshot.tasks[id]?.title ?? "?"
+        case .project, .heading: return snapshot.tasks[id]?.title ?? "?"
         case .area: return snapshot.areas[id]?.title ?? "?"
         case .tag: return snapshot.tags[id]?.title ?? "?"
         }
@@ -229,18 +249,28 @@ private final class SyncPass {
                 guard var task = snapshot.tasks[link.thingsId], task.kind == .todo, !task.trashed,
                       oldMapping.targetId != nil, matches(task, oldMapping), !matches(task, m) else { continue }
                 var patch = ThingsTodoPatch()
-                switch m.mode {
-                case .project: patch.placement = .project(target)
-                case .area: patch.placement = .area(target)
-                case .tag: patch.addTagIds = [target]
-                }
-                if oldMode == .tag, let oldTag = oldMapping.targetId, oldTag != target, task.tagIds.contains(oldTag) {
-                    patch.removeTagIds = [oldTag]
-                }
+                var newHeading: String?
                 do {
+                    switch m.mode {
+                    case .project:
+                        // Keep the to-do under a same-named heading when both projects mirror sections.
+                        if sectionsActive(m), let group = thingsGroup(task, oldMapping) {
+                            newHeading = try await heading(titled: group, in: target)
+                            patch.placement = .heading(newHeading!)
+                        } else {
+                            patch.placement = .project(target)
+                        }
+                    case .area: patch.placement = .area(target)
+                    case .tag: patch.addTagIds = [target]
+                    case .heading: patch.placement = .heading(target)
+                    }
+                    if oldMode == .tag, let oldTag = oldMapping.targetId, oldTag != target, task.tagIds.contains(oldTag) {
+                        patch.removeTagIds = [oldTag]
+                    }
                     try await things.updateTodo(id: task.id, patch: patch)
                     switch m.mode {
-                    case .project: task.projectId = target; task.areaId = nil; task.headingId = nil
+                    case .project: task.projectId = target; task.areaId = nil; task.headingId = newHeading
+                    case .heading: task.headingId = target; task.projectId = nil; task.areaId = nil
                     case .area: task.areaId = target; task.projectId = nil; task.headingId = nil
                     case .tag: if !task.tagIds.contains(target) { task.tagIds.append(target) }
                     }
@@ -266,9 +296,11 @@ private final class SyncPass {
 
     /// Maps each in-scope Things to-do to the first matching mapping (config order).
     func buildThingsScope() {
+        // A heading mapping claims its to-dos before a project mapping of the same project does.
+        let ordered = activeOrder.filter { $0.mode == .heading } + activeOrder.filter { $0.mode != .heading }
         for task in snapshot.tasks.values.sorted(by: { $0.id < $1.id }) {
             guard task.kind == .todo, !task.trashed, !task.isRepeating else { continue }
-            for m in activeOrder where matches(task, m) {
+            for m in ordered where matches(task, m) {
                 thingsScope[task.id] = m.id
                 break
             }
@@ -286,6 +318,57 @@ private final class SyncPass {
             return task.areaId == target && task.projectId == nil && task.headingId == nil
         case .tag:
             return task.tagIds.contains(target)
+        case .heading:
+            return task.headingId == target
+        }
+    }
+
+    // MARK: Groups (Reminders sections <-> Things headings)
+
+    func sectionsActive(_ m: ListMapping) -> Bool { m.mode == .project && m.syncSections }
+
+    /// The title of the heading a to-do sits under in the mapping's project, or nil when it is directly in the
+    /// project (or its heading is trashed or belongs to another project).
+    func thingsGroup(_ task: ThingsTask, _ m: ListMapping) -> String? {
+        guard sectionsActive(m), let target = m.targetId, let h = task.headingId, let heading = snapshot.tasks[h],
+              heading.kind == .heading, !heading.trashed, heading.projectId == target else { return nil }
+        return Fingerprint.cleanGroup(heading.title)
+    }
+
+    /// The existing heading titled `title` in the project (case-insensitive, oldest first when duplicated), or a new one.
+    /// A heading created here joins the snapshot, so later items in the pass reuse it.
+    func heading(titled title: String, in project: String) async throws -> String {
+        guard let clean = Fingerprint.cleanGroup(title) else { throw ThingsCloudError.invalidChange(["empty heading title"]) }
+        let key = clean.lowercased()
+        let hits = snapshot.tasks.values
+            .filter { $0.kind == .heading && !$0.trashed && $0.projectId == project && Fingerprint.groupKey($0.title) == key }
+            .sorted { ($0.creationDate ?? .distantPast, $0.id) < ($1.creationDate ?? .distantPast, $1.id) }
+        if let existing = hits.first { return existing.id }
+        let id = try await things.createHeading(title: clean, projectId: project)
+        snapshot.tasks[id] = ThingsTask(id: id, kind: .heading, title: clean, projectId: project)
+        log(.change, "Created Things heading \"\(clean)\" in \"\(snapshot.tasks[project]?.title ?? "project")\"")
+        return id
+    }
+
+    func placement(forGroup group: String?, in m: ListMapping) async throws -> ThingsPlacement {
+        guard let target = m.targetId else { throw ThingsCloudError.notFound("target of \(m.listTitle)") }
+        guard let group else { return .project(target) }
+        return .heading(try await heading(titled: group, in: target))
+    }
+
+    /// After a reminder write that asked for `wanted` (nil: no section), checks what RemCTL reports.
+    /// A section that cannot be removed is remembered (`stuckSection`), so the reminder still reading it is not
+    /// mistaken for a change; a section that did not take is recorded as it is, so the next pass retries it.
+    func reconcileSection(_ fp: inout Fingerprint, wanted: String?, actual: String?, title: String) {
+        let got = Fingerprint.cleanGroup(actual)
+        if Fingerprint.groupKey(got) == Fingerprint.groupKey(wanted) { fp.stuckSection = nil; return }
+        if wanted == nil {
+            fp.stuckSection = got
+            log(.info, "\"\(title)\" stays in its Reminders section \"\(got ?? "")\": RemCTL cannot remove a reminder from a section")
+        } else {
+            fp.group = got
+            fp.stuckSection = nil
+            log(.warning, "Could not put \"\(title)\" in the Reminders section \"\(wanted ?? "")\"; it will be retried")
         }
     }
 
@@ -352,19 +435,38 @@ private final class SyncPass {
             else { destination = activeById[rm]; movedThings = true }
         }
 
-        var plan = merge(base: link.fingerprint, reminder: reminder, task: task)
+        var groupInput: GroupInput?
+        if destination == nil, let m = activeById[tm], sectionsActive(m) {
+            groupInput = GroupInput(things: thingsGroup(task, m), reminders: reminder.section,
+                                    remindersReadOnly: groceryLists.contains(reminder.listId))
+        }
+        var plan = merge(base: link.fingerprint, reminder: reminder, task: task, group: groupInput)
         if let destination {
             if movedReminder { plan.reminderPatch.listId = destination.id }
             if movedThings { applyPlacement(&plan.thingsPatch, task: task, old: activeById[tm], new: destination) }
+            followAcrossMove(&plan, destination: destination, thingsMoves: movedThings, reminder: reminder, task: task)
         }
         let newMapping = destination?.id ?? tm
         do {
             var updated = link
+            if case .some(let group) = plan.thingsGroup, let m = destination ?? activeById[tm] {
+                plan.thingsPatch.placement = try await placement(forGroup: group, in: m)
+            }
             if !plan.reminderPatch.isEmpty {
                 let r = try await reminders.update(id: reminder.id, patch: plan.reminderPatch)
                 updated.reminderId = r.id; updated.reminderExternalId = r.externalId ?? updated.reminderExternalId
-                report.updatedInReminders += 1
-                log(.change, "Updated reminder \"\(r.title)\"" + (destination != nil && movedReminder ? " (moved to \"\(destination!.listTitle)\")" : ""))
+                var rest = plan.reminderPatch
+                rest.section = nil
+                if let wanted = plan.reminderPatch.section {
+                    reconcileSection(&plan.fingerprint, wanted: wanted, actual: r.section, title: r.title)
+                }
+                if !rest.isEmpty {
+                    report.updatedInReminders += 1
+                    log(.change, "Updated reminder \"\(r.title)\"" + (destination != nil && movedReminder ? " (moved to \"\(destination!.listTitle)\")" : ""))
+                } else if case .some(.some(let name)) = plan.reminderPatch.section {
+                    report.updatedInReminders += 1
+                    log(.change, "Moved reminder \"\(r.title)\" to the section \"\(name)\"")
+                }
             }
             if !plan.thingsPatch.isEmpty {
                 try await things.updateTodo(id: task.id, patch: plan.thingsPatch)
@@ -383,6 +485,23 @@ private final class SyncPass {
         }
     }
 
+    /// A pair that changes mapping carries its group across: the follower takes the leader's group in the new list.
+    func followAcrossMove(_ plan: inout MergePlan, destination: ListMapping, thingsMoves: Bool, reminder: ReminderItem, task: ThingsTask) {
+        plan.fingerprint.stuckSection = nil
+        guard sectionsActive(destination) else { plan.fingerprint.group = nil; return }
+        if thingsMoves {
+            // The to-do follows the reminder: it lands under the heading named like the reminder's section.
+            let group = Fingerprint.cleanGroup(reminder.section)
+            plan.thingsGroup = .some(group)
+            plan.fingerprint.group = group
+        } else {
+            // The reminder follows the to-do: it takes the section named like the to-do's heading.
+            let group = thingsGroup(task, destination)
+            if let group, !groceryLists.contains(destination.id) { plan.reminderPatch.section = .some(group) }
+            plan.fingerprint.group = groceryLists.contains(destination.id) ? nil : group
+        }
+    }
+
     func replace(_ link: LinkRecord) {
         if let i = store.links.firstIndex(where: { $0.id == link.id }) { store.links[i] = link }
     }
@@ -398,6 +517,7 @@ private final class SyncPass {
         switch new.mode {
         case .project: patch.placement = .project(target)
         case .area: patch.placement = .area(target)
+        case .heading: patch.placement = .heading(target)
         case .tag:
             if !task.tagIds.contains(target) { patch.addTagIds = [target] }
             if let old, old.mode != .tag { patch.placement = .inbox }
@@ -416,7 +536,7 @@ private final class SyncPass {
     }
 
     /// Per-field three-way merge. `base == nil` (first link) treats every differing field as a conflict.
-    func merge(base: Fingerprint?, reminder r: ReminderItem, task t: ThingsTask) -> MergePlan {
+    fileprivate func merge(base: Fingerprint?, reminder r: ReminderItem, task t: ThingsTask, group: GroupInput? = nil) -> MergePlan {
         let rf = Fingerprint(reminder: r, days: days)
         let tf = Fingerprint(things: t, days: days)
         var plan = MergePlan(fingerprint: rf)
@@ -484,6 +604,38 @@ private final class SyncPass {
             // Equal: keep whichever side knows the completion day.
             if plan.fingerprint.completionDay == nil { plan.fingerprint.completionDay = tf.completionDay }
         }
+        // Group (section <-> heading). Without section syncing the stored group is left alone. On first link a
+        // group beats none, and two different groups go to Things.
+        plan.fingerprint.group = base?.group
+        plan.fingerprint.stuckSection = base?.stuckSection
+        if let g = group {
+            let rg = Fingerprint.cleanGroup(g.reminders), tg = Fingerprint.cleanGroup(g.things)
+            let rk = Fingerprint.groupKey(rg), tk = Fingerprint.groupKey(tg), bk = Fingerprint.groupKey(base?.group)
+            if rk == tk {
+                plan.fingerprint.group = tg ?? rg
+                plan.fingerprint.stuckSection = nil
+            } else {
+                var rChanged = base == nil || rk != bk
+                let tChanged = base == nil || tk != bk
+                if let stuck = base?.stuckSection, Fingerprint.groupKey(stuck) == rk { rChanged = false }
+                var side: Side?
+                if g.remindersReadOnly {
+                    // Sections there are read-only: only Reminders can move things, and a missing section on first link says nothing.
+                    if rChanged && !(firstLink && rg == nil) { side = .reminders }
+                    else if firstLink { plan.fingerprint.group = rg }
+                } else if rChanged || tChanged {
+                    side = decide("section", equal: false, rChanged: rChanged, tChanged: tChanged,
+                                  tiebreak: firstLink ? (rg == nil ? .things : tg == nil ? .reminders : .things) : nil)
+                }
+                switch side {
+                case .reminders:
+                    plan.thingsGroup = .some(rg); plan.fingerprint.group = rg; plan.fingerprint.stuckSection = nil
+                case .things:
+                    plan.reminderPatch.section = .some(tg); plan.fingerprint.group = tg; plan.fingerprint.stuckSection = nil
+                case nil: break
+                }
+            }
+        }
         return plan
     }
 
@@ -540,10 +692,20 @@ private final class SyncPass {
     }
 
     func pair(reminder r: ReminderItem, task t: ThingsTask, mapping m: ListMapping) async {
-        let plan = merge(base: nil, reminder: r, task: t)
+        var groupInput: GroupInput?
+        if sectionsActive(m) {
+            groupInput = GroupInput(things: thingsGroup(t, m), reminders: r.section, remindersReadOnly: groceryLists.contains(r.listId))
+        }
+        var plan = merge(base: nil, reminder: r, task: t, group: groupInput)
         do {
             var linkedReminder = r
-            if !plan.reminderPatch.isEmpty { linkedReminder = try await reminders.update(id: r.id, patch: plan.reminderPatch) }
+            if case .some(let group) = plan.thingsGroup { plan.thingsPatch.placement = try await placement(forGroup: group, in: m) }
+            if !plan.reminderPatch.isEmpty {
+                linkedReminder = try await reminders.update(id: r.id, patch: plan.reminderPatch)
+                if let wanted = plan.reminderPatch.section {
+                    reconcileSection(&plan.fingerprint, wanted: wanted, actual: linkedReminder.section, title: r.title)
+                }
+            }
             if !plan.thingsPatch.isEmpty { try await things.updateTodo(id: t.id, patch: plan.thingsPatch) }
             store.links.append(LinkRecord(reminderId: linkedReminder.id, reminderExternalId: linkedReminder.externalId ?? r.externalId,
                                           thingsId: t.id, mappingId: m.id, fingerprint: plan.fingerprint))
@@ -555,19 +717,22 @@ private final class SyncPass {
     }
 
     func createThings(from r: ReminderItem, mapping m: ListMapping, target: String) async {
-        let placement: ThingsPlacement
+        var placement: ThingsPlacement
         var tags: [String] = []
+        let group = sectionsActive(m) ? Fingerprint.cleanGroup(r.section) : nil
         switch m.mode {
         case .project: placement = .project(target)
         case .area: placement = .area(target)
         case .tag: placement = .inbox; tags = [target]
+        case .heading: placement = .heading(target)
         }
-        let draft = ThingsTodoDraft(title: r.title, notes: r.notes, when: r.due, completed: r.completed,
-                                    completionDate: r.completionDate, placement: placement, tagIds: tags)
         do {
+            if let group { placement = try await self.placement(forGroup: group, in: m) }
+            let draft = ThingsTodoDraft(title: r.title, notes: r.notes, when: r.due, completed: r.completed,
+                                        completionDate: r.completionDate, placement: placement, tagIds: tags)
             let id = try await things.createTodo(draft)
             store.links.append(LinkRecord(reminderId: r.id, reminderExternalId: r.externalId, thingsId: id, mappingId: m.id,
-                                          fingerprint: Fingerprint(reminder: r, days: days)))
+                                          fingerprint: Fingerprint(reminder: r, days: days, group: group)))
             report.createdInThings += 1
             log(.change, "Created Things to-do \"\(r.title)\" from list \"\(m.listTitle)\"")
         } catch {
@@ -577,11 +742,24 @@ private final class SyncPass {
 
     func createReminder(from t: ThingsTask, mapping m: ListMapping) async {
         let done = t.status != .open
+        let active = sectionsActive(m)
+        let group = active ? thingsGroup(t, m) : nil
+        let wanted = groceryLists.contains(m.id) ? nil : group
         do {
             let r = try await reminders.create(title: t.title, notes: t.notes, due: t.due, completed: done,
-                                               completionDate: done ? t.stopDate : nil, listId: m.id)
+                                               completionDate: done ? t.stopDate : nil, listId: m.id, section: wanted)
+            var fingerprint = Fingerprint(things: t, days: days, group: group)
+            if active {
+                // Record the section the reminder really has: a section that did not take (or a grocery
+                // category) must not look like a later change on the Reminders side.
+                let actual = Fingerprint.cleanGroup(r.section)
+                if Fingerprint.groupKey(actual) != Fingerprint.groupKey(group) { fingerprint.group = actual }
+                if wanted != nil, Fingerprint.groupKey(actual) != Fingerprint.groupKey(wanted) {
+                    log(.warning, "Could not put \"\(t.title)\" in the Reminders section \"\(wanted ?? "")\"; it will be retried")
+                }
+            }
             store.links.append(LinkRecord(reminderId: r.id, reminderExternalId: r.externalId, thingsId: t.id, mappingId: m.id,
-                                          fingerprint: Fingerprint(things: t, days: days)))
+                                          fingerprint: fingerprint))
             report.createdInReminders += 1
             log(.change, "Created reminder \"\(t.title)\" in \"\(m.listTitle)\"")
         } catch {

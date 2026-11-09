@@ -12,23 +12,41 @@ public struct Fingerprint: Codable, Hashable, Sendable {
     public var completed: Bool
     /// Local calendar day of completion (`YYYY-MM-DD`), when completed and known.
     public var completionDay: String?
+    /// The group (Reminders section / Things heading title) both sides had when last written, in its
+    /// original spelling; nil for none. Links saved before sections existed decode it as nil.
+    public var group: String?
+    /// A Reminders section the reminder could not be removed from (RemCTL cannot clear one) while the
+    /// Things side sits at no heading. A reminder still reading this section is not a change.
+    public var stuckSection: String?
 
-    public init(title: String, notes: String, due: DueDate?, completed: Bool, completionDay: String?) {
+    public init(title: String, notes: String, due: DueDate?, completed: Bool, completionDay: String?,
+                group: String? = nil, stuckSection: String? = nil) {
         self.title = title; self.notes = notes; self.due = due
         self.completed = completed; self.completionDay = completionDay
+        self.group = group; self.stuckSection = stuckSection
     }
 
     static func normalize(_ text: String) -> String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
 
-    init(reminder r: ReminderItem, days: DayFormatter) {
-        self.init(title: Self.normalize(r.title), notes: Self.normalize(r.notes), due: r.due, completed: r.completed,
-                  completionDay: r.completed ? r.completionDate.map(days.day) : nil)
+    /// A group name trimmed; blank is no group.
+    static func cleanGroup(_ name: String?) -> String? {
+        guard let name else { return nil }
+        let trimmed = normalize(name)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
-    init(things t: ThingsTask, days: DayFormatter) {
+    /// Comparison key: trimmed and case-insensitive.
+    static func groupKey(_ name: String?) -> String? { cleanGroup(name)?.lowercased() }
+
+    init(reminder r: ReminderItem, days: DayFormatter, group: String? = nil) {
+        self.init(title: Self.normalize(r.title), notes: Self.normalize(r.notes), due: r.due, completed: r.completed,
+                  completionDay: r.completed ? r.completionDate.map(days.day) : nil, group: Self.cleanGroup(group))
+    }
+
+    init(things t: ThingsTask, days: DayFormatter, group: String? = nil) {
         let done = t.status != .open   // Things canceled counts as completed in Reminders.
         self.init(title: Self.normalize(t.title), notes: Self.normalize(t.notes), due: t.due, completed: done,
-                  completionDay: done ? t.stopDate.map(days.day) : nil)
+                  completionDay: done ? t.stopDate.map(days.day) : nil, group: Self.cleanGroup(group))
     }
 
     /// True when the completion state differs. The completion day only counts when both days are known.

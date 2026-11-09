@@ -206,6 +206,17 @@ public actor ThingsCloudClient: ThingsBackend {
         }
     }
 
+    public func createHeading(title: String, projectId: String) async throws -> String {
+        try await withLock {
+            let id = ThingsID.generate()
+            let change = ThingsChanges.taskCreate(
+                title: title, notes: "", type: 2, scheduling: try ThingsChanges.scheduling(nil, today: today()),
+                containers: ThingsChanges.containers(.project(projectId)), tags: [], completed: false, completionDate: nil, now: now())
+            try await commit([id: change])
+            return id
+        }
+    }
+
     public func createArea(title: String) async throws -> String {
         try await withLock {
             let id = ThingsID.generate()

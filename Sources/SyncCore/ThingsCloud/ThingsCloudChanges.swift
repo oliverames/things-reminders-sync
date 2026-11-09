@@ -81,6 +81,8 @@ enum ThingsChanges {
         case .inbox: return ["pr": [], "agr": [], "ar": []]
         case let .project(id): return ["pr": idArray([id]), "agr": [], "ar": []]
         case let .area(id): return ["pr": [], "agr": [], "ar": idArray([id])]
+        // A to-do in a heading belongs to its project through the heading.
+        case let .heading(id): return ["pr": [], "agr": idArray([id]), "ar": []]
         }
     }
 

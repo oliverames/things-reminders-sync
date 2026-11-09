@@ -12,9 +12,30 @@ actor FakeRemCTL: RemCTLTransport {
     private(set) var exportCount = 0
     var failLists: RemCTLError?
     private var nextId = 100
+    /// Sections per list id, as `get_list` reports them.
+    var listSections: [Int: [String]] = [:]
+    private(set) var cliCalls: [[String]] = []
+    var failShow = false
 
-    static func list(_ id: Int, _ title: String, group: Bool = false) -> JSONValue {
-        ["id": .number(Double(id)), "title": .string(title), "isGroup": .bool(group), "color": ["hex": "#FF9500"]]
+    static func list(_ id: Int, _ title: String, group: Bool = false, groceries: Bool = false) -> JSONValue {
+        ["id": .number(Double(id)), "title": .string(title), "isGroup": .bool(group), "isGroceries": .bool(groceries),
+         "color": ["hex": "#FF9500"]]
+    }
+
+    func setSections(_ list: Int, _ names: [String]) { listSections[list] = names }
+    func setFailShow(_ v: Bool) { failShow = v }
+
+    /// Applies the section arguments of `create_reminder` / `update_reminder` to a row.
+    private func applySection(_ id: Int, _ arguments: [String: JSONValue], list: Int?) {
+        let listId = list ?? lists.first { $0["title"]?.string == rows[id]?["list"]?.string }?["id"]?.int ?? 0
+        if let name = arguments["new_section"]?.string {
+            listSections[listId, default: []].append(name)
+            edit(id, "section", .string(name))
+        } else if let name = arguments["section"]?.string {
+            edit(id, "section", .string(name))
+        } else if let sectionId = arguments["section_id"]?.string {
+            edit(id, "section", .string(sectionId))
+        }
     }
 
     static func row(_ id: Int, _ title: String, list: String = "Work", _ extra: [String: JSONValue] = [:]) -> JSONValue {
@@ -47,16 +68,22 @@ actor FakeRemCTL: RemCTLTransport {
             var extra: [String: JSONValue] = [:]
             if let n = arguments["notes"] { extra["notes"] = n }
             put(Self.row(nextId, arguments["title"]?.string ?? "", list: listTitle, extra))
+            applySection(nextId, arguments, list: arguments["list_id"]?.int)
             return ["status": "created", "id": .number(Double(nextId))]
         case "update_reminder":
             let id = arguments["reminder_id"]!.int!
             if let t = arguments["title"] { edit(id, "title", t) }
             if let l = arguments["list_id"]?.int, let title = lists.first(where: { $0["id"]?.int == l })?["title"] { edit(id, "list", title) }
+            applySection(id, arguments, list: nil)
             return ["status": "updated", "id": .number(Double(id))]
         case "set_completion":
             let id = arguments["reminder_id"]!.int!
             edit(id, "completed", arguments["completed"] ?? false)
             return ["status": "completed", "id": .number(Double(id))]
+        case "get_list":
+            let id = arguments["list_id"]?.int ?? 0
+            let sections = (listSections[id] ?? []).map { JSONValue.object(["id": .string("S-\($0)"), "name": .string($0)]) }
+            return ["id": .number(Double(id)), "sections": .array(sections)]
         case "get_reminder":
             guard let row = rows[arguments["reminder_id"]?.int ?? 0] else { throw RemCTLError.tool("Error: #\(arguments["reminder_id"]?.int ?? 0) not found") }
             return row
@@ -70,9 +97,32 @@ actor FakeRemCTL: RemCTLTransport {
     }
 
     func runCLI(_ arguments: [String]) async throws -> JSONValue {
+        cliCalls.append(arguments)
+        if arguments.first == "show" {
+            // ["show", "--list-id", id, "--completed", "--json"]: rows of one list, with their sections.
+            if failShow { throw RemCTLError.tool("show failed") }
+            guard arguments.count == 5, let id = Int(arguments[2]),
+                  let title = lists.first(where: { $0["id"]?.int == id })?["title"]?.string else { throw RemCTLError.tool("unexpected cli \(arguments)") }
+            return .array(rows.keys.sorted().compactMap { rows[$0] }.filter { $0["list"]?.string == title })
+        }
+        if arguments == ["sections", "--json"] {
+            // Like the real command: an object keyed by list title, only for lists that have sections.
+            var byList: [String: [JSONValue]] = [:]
+            for row in rows.values {
+                if let list = row["list"]?.string, let name = row["section"]?.string, !name.isEmpty {
+                    byList[list, default: []].append(.object(["name": .string(name)]))
+                }
+            }
+            return .object(byList.mapValues { .array($0) })
+        }
         guard arguments == ["export", "--json"] else { throw RemCTLError.tool("unexpected cli \(arguments)") }
         exportCount += 1
-        return .array(rows.keys.sorted().map { rows[$0]! })
+        // Like the real export, rows carry no `section`.
+        return .array(rows.keys.sorted().map { key in
+            guard case .object(var o) = rows[key]! else { return rows[key]! }
+            o["section"] = nil
+            return .object(o)
+        })
     }
 
     func serverVersion() async -> String? { "2.5.0" }
@@ -193,7 +243,7 @@ func makeBackend(_ fake: FakeRemCTL, dir: URL = tempDir(), clock: Clock = Clock(
     @Test func timedDueSetsAlarm() async throws {
         let fake = FakeRemCTL()
         let backend = makeBackend(fake)
-        let item = try await backend.create(title: "T", notes: "", due: DueDate(day: "2026-11-10", minutes: 9 * 60), completed: false, completionDate: nil, listId: "2")
+        let item = try await backend.create(title: "T", notes: "", due: DueDate(day: "2026-11-10", minutes: 9 * 60), completed: false, completionDate: nil, listId: "2", section: nil)
         let args = try #require(await fake.calls("create_reminder").first)
         #expect(args["due"] == "2026-11-10 09:00" && args["alarm"] == "2026-11-10T09:00:00")
         #expect(args["list_id"] == 2 && args["notes"] == nil)
@@ -202,7 +252,7 @@ func makeBackend(_ fake: FakeRemCTL, dir: URL = tempDir(), clock: Clock = Clock(
 
     @Test func allDayDueHasNoAlarmAndNotesAreSent() async throws {
         let fake = FakeRemCTL()
-        _ = try await makeBackend(fake).create(title: "T", notes: "body", due: DueDate(day: "2026-11-10"), completed: false, completionDate: nil, listId: "1")
+        _ = try await makeBackend(fake).create(title: "T", notes: "body", due: DueDate(day: "2026-11-10"), completed: false, completionDate: nil, listId: "1", section: nil)
         let args = try #require(await fake.calls("create_reminder").first)
         #expect(args["due"] == "2026-11-10" && args["alarm"] == nil && args["notes"] == "body")
     }
@@ -210,7 +260,7 @@ func makeBackend(_ fake: FakeRemCTL, dir: URL = tempDir(), clock: Clock = Clock(
     @Test func createCompletedPassesCompletionDate() async throws {
         let fake = FakeRemCTL()
         let date = try #require(RemCTLReminders.parseLocal("2026-11-09T10:30:00"))
-        let item = try await makeBackend(fake).create(title: "T", notes: "", due: nil, completed: true, completionDate: date, listId: "1")
+        let item = try await makeBackend(fake).create(title: "T", notes: "", due: nil, completed: true, completionDate: date, listId: "1", section: nil)
         let done = try #require(await fake.calls("set_completion").first)
         #expect(done["completed"] == true && done["completion_date"] == "2026-11-09T10:30:00")
         #expect(item.completed)

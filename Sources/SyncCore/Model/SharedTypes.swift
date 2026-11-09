@@ -84,6 +84,8 @@ public enum ThingsPlacement: Codable, Hashable, Sendable {
     case inbox
     case project(String)
     case area(String)
+    /// Inside a heading. The project is derived through the heading (`pr` stays empty).
+    case heading(String)
 }
 
 /// Field changes for a Things to-do. `nil` leaves a field alone.
@@ -140,6 +142,7 @@ public struct ThingsSnapshot: Sendable {
         self.tasks = tasks; self.areas = areas; self.tags = tags
     }
     public var projects: [ThingsTask] { tasks.values.filter { $0.kind == .project && !$0.trashed } }
+    public var headings: [ThingsTask] { tasks.values.filter { $0.kind == .heading && !$0.trashed } }
 }
 
 public struct ThingsRefreshResult: Sendable {
@@ -161,6 +164,8 @@ public protocol ThingsBackend: Sendable {
     func createTodo(_ draft: ThingsTodoDraft) async throws -> String
     func updateTodo(id: String, patch: ThingsTodoPatch) async throws
     func createProject(title: String, areaId: String?) async throws -> String
+    /// Creates a heading inside a project (Anytime) and returns its id.
+    func createHeading(title: String, projectId: String) async throws -> String
     func createArea(title: String) async throws -> String
     func createTag(title: String, parentId: String?) async throws -> String
 }
@@ -175,9 +180,12 @@ public struct ReminderList: Codable, Hashable, Sendable, Identifiable {
     public var colorHex: String?
     public var sourceTitle: String?
     public var allowsModifications: Bool
-    public init(id: String, title: String, colorHex: String? = nil, sourceTitle: String? = nil, allowsModifications: Bool = true) {
+    /// Grocery-type lists auto-categorize reminders into sections; the engine never writes sections there.
+    public var isGroceries: Bool
+    public init(id: String, title: String, colorHex: String? = nil, sourceTitle: String? = nil, allowsModifications: Bool = true,
+                isGroceries: Bool = false) {
         self.id = id; self.title = title; self.colorHex = colorHex; self.sourceTitle = sourceTitle
-        self.allowsModifications = allowsModifications
+        self.allowsModifications = allowsModifications; self.isGroceries = isGroceries
     }
 }
 
@@ -194,12 +202,14 @@ public struct ReminderItem: Codable, Hashable, Sendable, Identifiable {
     public var completionDate: Date?
     public var lastModified: Date?
     public var isRepeating: Bool
+    /// The Reminders section the item sits in, if any.
+    public var section: String?
     public init(id: String, externalId: String? = nil, listId: String, title: String, notes: String = "",
                 due: DueDate? = nil, completed: Bool = false, completionDate: Date? = nil,
-                lastModified: Date? = nil, isRepeating: Bool = false) {
+                lastModified: Date? = nil, isRepeating: Bool = false, section: String? = nil) {
         self.id = id; self.externalId = externalId; self.listId = listId; self.title = title; self.notes = notes
         self.due = due; self.completed = completed; self.completionDate = completionDate
-        self.lastModified = lastModified; self.isRepeating = isRepeating
+        self.lastModified = lastModified; self.isRepeating = isRepeating; self.section = section
     }
 }
 
@@ -211,12 +221,15 @@ public struct ReminderPatch: Codable, Hashable, Sendable {
     public var completed: Bool?
     public var completionDate: Date?
     public var listId: String?
+    /// `.some(name)` assigns the section (creating it when missing); `.some(nil)` asks to remove the
+    /// reminder from its section (RemCTL 2.5.0 cannot; see docs/SPEC.md). Applied after any list move.
+    public var section: String??
     public init(title: String? = nil, notes: String? = nil, due: DueDate?? = nil, completed: Bool? = nil,
-                completionDate: Date? = nil, listId: String? = nil) {
+                completionDate: Date? = nil, listId: String? = nil, section: String?? = nil) {
         self.title = title; self.notes = notes; self.due = due; self.completed = completed
-        self.completionDate = completionDate; self.listId = listId
+        self.completionDate = completionDate; self.listId = listId; self.section = section
     }
-    public var isEmpty: Bool { title == nil && notes == nil && due == nil && completed == nil && listId == nil }
+    public var isEmpty: Bool { title == nil && notes == nil && due == nil && completed == nil && listId == nil && section == nil }
 }
 
 public enum RemindersAccess: String, Codable, Sendable { case notDetermined, granted, denied }
@@ -228,7 +241,8 @@ public protocol RemindersBackend: Sendable {
     func lists() async throws -> [ReminderList]
     /// All reminders (open and completed) in the given lists.
     func reminders(inLists listIds: [String]) async throws -> [ReminderItem]
-    func create(title: String, notes: String, due: DueDate?, completed: Bool, completionDate: Date?, listId: String) async throws -> ReminderItem
+    func create(title: String, notes: String, due: DueDate?, completed: Bool, completionDate: Date?, listId: String,
+                section: String?) async throws -> ReminderItem
     func update(id: String, patch: ReminderPatch) async throws -> ReminderItem
     /// Removes the reminder. Missing ids are not an error.
     func delete(id: String) async throws
@@ -245,6 +259,8 @@ public enum MappingMode: String, Codable, CaseIterable, Sendable {
     case area
     /// The list mirrors every to-do carrying one Things tag; new items land in the Things Inbox.
     case tag
+    /// The list mirrors the to-dos under ONE heading of a project (`targetId` is the heading id).
+    case heading
 }
 
 public struct ListMapping: Codable, Hashable, Sendable, Identifiable {
@@ -262,15 +278,22 @@ public struct ListMapping: Codable, Hashable, Sendable, Identifiable {
     /// True while the user is choosing a target after changing the mode. The engine neither syncs
     /// this mapping nor creates a target for it until the user picks one (or confirms "New…").
     public var awaitingTarget: Bool
+    /// For `.heading` mode: the project the heading lives in (needed to create the heading).
+    public var parentProjectId: String?
+    /// For `.project` mode: mirror the reminder's section as the to-do's heading. Ignored in other modes.
+    public var syncSections: Bool
 
     public init(id: String, listTitle: String, enabled: Bool = true, mode: MappingMode = .project,
-                targetId: String? = nil, targetTitle: String, projectAreaId: String? = nil, awaitingTarget: Bool = false) {
+                targetId: String? = nil, targetTitle: String, projectAreaId: String? = nil, awaitingTarget: Bool = false,
+                parentProjectId: String? = nil, syncSections: Bool = true) {
         self.id = id; self.listTitle = listTitle; self.enabled = enabled; self.mode = mode
         self.targetId = targetId; self.targetTitle = targetTitle; self.projectAreaId = projectAreaId
-        self.awaitingTarget = awaitingTarget
+        self.awaitingTarget = awaitingTarget; self.parentProjectId = parentProjectId; self.syncSections = syncSections
     }
 
-    private enum CodingKeys: String, CodingKey { case id, listTitle, enabled, mode, targetId, targetTitle, projectAreaId, awaitingTarget }
+    private enum CodingKeys: String, CodingKey {
+        case id, listTitle, enabled, mode, targetId, targetTitle, projectAreaId, awaitingTarget, parentProjectId, syncSections
+    }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -282,6 +305,8 @@ public struct ListMapping: Codable, Hashable, Sendable, Identifiable {
         targetTitle = try c.decodeIfPresent(String.self, forKey: .targetTitle) ?? listTitle
         projectAreaId = try c.decodeIfPresent(String.self, forKey: .projectAreaId)
         awaitingTarget = try c.decodeIfPresent(Bool.self, forKey: .awaitingTarget) ?? false
+        parentProjectId = try c.decodeIfPresent(String.self, forKey: .parentProjectId)
+        syncSections = try c.decodeIfPresent(Bool.self, forKey: .syncSections) ?? true
     }
 }
 

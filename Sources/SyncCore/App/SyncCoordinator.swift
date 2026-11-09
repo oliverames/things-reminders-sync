@@ -33,6 +33,8 @@ public final class SyncCoordinator {
     public private(set) var log: [SyncLogEntry] = []
     public private(set) var reminderLists: [ReminderList] = []
     public private(set) var thingsProjects: [ThingsTask] = []
+    /// Headings (not trashed) of every Things project, for the heading picker.
+    public private(set) var thingsHeadings: [ThingsTask] = []
     public private(set) var thingsAreas: [ThingsArea] = []
     public private(set) var thingsTags: [ThingsTag] = []
     /// Number of linked item pairs per Reminders list id.
@@ -131,7 +133,7 @@ public final class SyncCoordinator {
         if case .signedIn(let email) = thingsAccount { try? deps.credentials.delete(email: email) }
         thingsBackend = nil
         thingsAccount = .signedOut
-        thingsProjects = []; thingsAreas = []; thingsTags = []
+        thingsProjects = []; thingsHeadings = []; thingsAreas = []; thingsTags = []
         stopObservers()
         refreshPhase()
     }
@@ -197,6 +199,8 @@ public final class SyncCoordinator {
         guard let remctl = deps.remctl else { return }
         await remctl.configure(executablePath: config.remctlPath, pollSeconds: config.remindersPollSeconds)
         await remctl.setWatchedLists(config.mappings.filter(\.enabled).map(\.id))
+        // Sections are only read for project-mode lists that mirror them as headings.
+        await remctl.setSectionLists(config.mappings.filter { $0.enabled && !$0.awaitingTarget && $0.mode == .project && $0.syncSections }.map(\.id))
     }
 
     private func refreshRemindersDetail() async {
@@ -214,6 +218,7 @@ public final class SyncCoordinator {
 
     private func applyCatalog(_ snapshot: ThingsSnapshot) {
         thingsProjects = snapshot.projects.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+        thingsHeadings = snapshot.headings.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
         thingsAreas = snapshot.areas.values.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
         thingsTags = snapshot.tags.values.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
     }
@@ -337,7 +342,8 @@ public final class SyncCoordinator {
                   let before = startedWith.mappings.first(where: { $0.id == created.id }), before.targetId == nil,
                   let i = merged.mappings.firstIndex(where: { $0.id == created.id }),
                   merged.mappings[i].targetId == nil, merged.mappings[i].mode == before.mode,
-                  merged.mappings[i].targetTitle == before.targetTitle
+                  merged.mappings[i].targetTitle == before.targetTitle,
+                  merged.mappings[i].parentProjectId == before.parentProjectId
             else { continue }
             merged.mappings[i].targetId = newId
         }
