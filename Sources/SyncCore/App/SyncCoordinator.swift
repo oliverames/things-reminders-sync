@@ -317,8 +317,9 @@ public final class SyncCoordinator {
 
             phase = .syncing
             let engine = SyncEngine(things: things, reminders: deps.reminders)
-            let report = try await engine.sync(config: config, links: links, scope: scope, forceDeletions: work.force)
-            apply(report, forced: work.force)
+            let startedWith = config
+            let report = try await engine.sync(config: startedWith, links: links, scope: scope, forceDeletions: work.force)
+            apply(report, startedWith: startedWith, forced: work.force)
         } catch {
             let message = error.localizedDescription
             if phase != .error(message) { append([SyncLogEntry(level: .error, message: "Sync failed: \(message)")]) }
@@ -327,9 +328,38 @@ public final class SyncCoordinator {
         }
     }
 
-    private func apply(_ report: SyncReport, forced: Bool) {
-        config = report.config
-        links = report.links
+    /// Copies target ids the engine created into the live config, but only where the user has not
+    /// since changed that mapping's target. Everything else in `current` wins.
+    static func mergeEngineConfig(current: SyncConfig, startedWith: SyncConfig, engine: SyncConfig) -> SyncConfig {
+        var merged = current
+        for created in engine.mappings {
+            guard let newId = created.targetId,
+                  let before = startedWith.mappings.first(where: { $0.id == created.id }), before.targetId == nil,
+                  let i = merged.mappings.firstIndex(where: { $0.id == created.id }),
+                  merged.mappings[i].targetId == nil, merged.mappings[i].mode == before.mode,
+                  merged.mappings[i].targetTitle == before.targetTitle
+            else { continue }
+            merged.mappings[i].targetId = newId
+        }
+        return merged
+    }
+
+    /// Drops links (and first-link markers) for mappings removed from the live config mid-pass.
+    static func pruneLinks(_ store: LinkStore, to config: SyncConfig) -> LinkStore {
+        let ids = Set(config.mappings.map(\.id))
+        var pruned = store
+        pruned.links.removeAll { !ids.contains($0.mappingId) }
+        pruned.linkedMappings = pruned.linkedMappings.filter { ids.contains($0.key) }
+        return pruned
+    }
+
+    private func apply(_ report: SyncReport, startedWith: SyncConfig, forced: Bool) {
+        // The user may have edited settings while the pass ran; keep those edits and take only what
+        // the engine adds (ids of targets it created). updateConfig already queued the next pass.
+        let configChanged = config != startedWith
+        config = Self.mergeEngineConfig(current: config, startedWith: startedWith, engine: report.config)
+        links = Self.pruneLinks(report.links, to: config)
+        if configChanged { persist() }
         linkedCounts = links.countsByMapping
         append(report.log)
         reminderLists = report.reminderLists
