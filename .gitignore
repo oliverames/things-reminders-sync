@@ -4,3 +4,4 @@
 DerivedData/
 .DS_Store
 /fixtures-private/
+dist/

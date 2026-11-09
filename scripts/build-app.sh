@@ -9,8 +9,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG="${1:-debug}"
 APP_NAME="ThingsRemindersSync"
 BUNDLE_ID="${BUNDLE_ID:-com.oliverames.ThingsRemindersSync}"
-VERSION="0.1.0"
-BUILD_NUMBER="1"
+VERSION="${VERSION:-0.1.0}"
+BUILD_NUMBER="${BUILD_NUMBER:-1}"
 # Set SIGN_IDENTITY to your own "Developer ID Application: ..." identity; without one the app is signed ad hoc.
 IDENTITY="${SIGN_IDENTITY:-Developer ID Application: Oliver Ames (PV3W52NDZ3)}"
 APP_DIR="$ROOT/.build/$APP_NAME.app"
@@ -44,7 +44,7 @@ rm -rf "$ICON_TMP"
 
 if security find-identity -v -p codesigning | grep -q "$IDENTITY"; then
   echo "Signing with: $IDENTITY"
-  codesign --force --options runtime --timestamp=none \
+  codesign --force --options runtime "${TIMESTAMP_FLAG:---timestamp=none}" \
     --entitlements "$ROOT/Resources/ThingsRemindersSync.entitlements" \
     --sign "$IDENTITY" "$APP_DIR"
 else
