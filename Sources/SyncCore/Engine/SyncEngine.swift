@@ -361,10 +361,16 @@ private final class SyncPass {
             return tiebreak ?? later
         }
 
+        // First link (no base) is conservative: modification times are not comparable yet (RemCTL
+        // stamps every reminder "modified now" on its first poll), so an empty value never replaces
+        // a filled one, Things keeps its title casing and its (Markdown) notes when both have text,
+        // and completed beats open.
+        let firstLink = base == nil
         // Title
         let titleSide = decide("title", equal: rf.title == tf.title,
                                rChanged: base.map { rf.title != $0.title } ?? true,
-                               tChanged: base.map { tf.title != $0.title } ?? true)
+                               tChanged: base.map { tf.title != $0.title } ?? true,
+                               tiebreak: firstLink ? .things : nil)
         switch titleSide {
         case .reminders: plan.thingsPatch.title = r.title; plan.fingerprint.title = rf.title
         case .things: plan.reminderPatch.title = t.title; plan.fingerprint.title = tf.title
@@ -373,7 +379,8 @@ private final class SyncPass {
         // Notes
         let notesSide = decide("notes", equal: rf.notes == tf.notes,
                                rChanged: base.map { rf.notes != $0.notes } ?? true,
-                               tChanged: base.map { tf.notes != $0.notes } ?? true)
+                               tChanged: base.map { tf.notes != $0.notes } ?? true,
+                               tiebreak: firstLink ? (tf.notes.isEmpty ? .reminders : .things) : nil)
         switch notesSide {
         case .reminders: plan.thingsPatch.notes = r.notes; plan.fingerprint.notes = rf.notes
         case .things: plan.reminderPatch.notes = t.notes; plan.fingerprint.notes = tf.notes
@@ -393,7 +400,8 @@ private final class SyncPass {
         // Completion
         let compSide = decide("completion", equal: !Fingerprint.completionDiffers(rf, tf),
                               rChanged: base.map { Fingerprint.completionDiffers(rf, $0) } ?? true,
-                              tChanged: base.map { Fingerprint.completionDiffers(tf, $0) } ?? true)
+                              tChanged: base.map { Fingerprint.completionDiffers(tf, $0) } ?? true,
+                              tiebreak: firstLink ? (tf.completed || !rf.completed ? .things : .reminders) : nil)
         switch compSide {
         case .reminders:
             plan.thingsPatch.completed = r.completed

@@ -1,7 +1,8 @@
 #!/bin/bash
 # Builds Things Reminders Sync with SwiftPM and assembles a signed .app bundle.
 # Usage: scripts/build-app.sh [debug|release]
-# Signs with the Developer ID identity so the Reminders (TCC) grant stays stable across rebuilds.
+# Signs with the Developer ID identity and the hardened runtime. The app holds no Reminders permission:
+# Reminders access goes through RemCTL (its Capability Host holds the grant).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -46,7 +47,7 @@ if security find-identity -v -p codesigning | grep -q "$IDENTITY"; then
     --entitlements "$ROOT/Resources/ThingsRemindersSync.entitlements" \
     --sign "$IDENTITY" "$APP_DIR"
 else
-  echo "warning: '$IDENTITY' not found; signing ad hoc. The Reminders permission will be re-requested after each rebuild." >&2
+  echo "warning: '$IDENTITY' not found; signing ad hoc." >&2
   codesign --force --options runtime \
     --entitlements "$ROOT/Resources/ThingsRemindersSync.entitlements" \
     --sign - "$APP_DIR"

@@ -11,7 +11,7 @@ import Observation
 @Observable
 public final class SyncCoordinator {
     public enum Phase: Equatable, Sendable {
-        case needsSetup          // no Things credentials yet, or no Reminders access
+        case needsSetup          // no Things credentials yet, or RemCTL is not ready
         case idle
         case syncing
         case paused
@@ -27,6 +27,8 @@ public final class SyncCoordinator {
     public private(set) var phase: Phase = .needsSetup
     public private(set) var thingsAccount: ThingsAccount = .signedOut
     public private(set) var remindersAccess: RemindersAccess = .notDetermined
+    /// RemCTL status for the UI: "Ready via RemCTL 2.5.0", or the reason it is unavailable.
+    public private(set) var remindersDetail: String = "Not checked yet"
     public private(set) var lastSync: Date?
     public private(set) var log: [SyncLogEntry] = []
     public private(set) var reminderLists: [ReminderList] = []
@@ -43,14 +45,17 @@ public final class SyncCoordinator {
         var stateStore: StateStore
         var credentials: any CredentialStore
         var reminders: any RemindersBackend
+        /// The RemCTL backend when `reminders` is one; settings (path, poll interval, watched lists) are pushed to it.
+        var remctl: RemCTLReminders?
         var makeThings: @Sendable (_ email: String, _ password: String) -> any ThingsBackend
         var verifyThings: @Sendable (_ email: String, _ password: String) async throws -> String
         /// Tests turn the timers, the Reminders stream, and the wake observer off.
         var runsObservers = true
 
         static func live() -> Dependencies {
-            Dependencies(
-                stateStore: StateStore(), credentials: Keychain(), reminders: EventKitReminders(),
+            let remctl = RemCTLReminders()
+            return Dependencies(
+                stateStore: StateStore(), credentials: Keychain(), reminders: remctl, remctl: remctl,
                 makeThings: { ThingsCloudClient(email: $0, password: $1, timeZone: .current) },
                 verifyThings: { try await ThingsCloudClient.verify(email: $0, password: $1) })
         }
@@ -93,12 +98,14 @@ public final class SyncCoordinator {
         config = deps.stateStore.loadConfig()
         links = deps.stateStore.loadLinks()
         log = deps.stateStore.loadLog()
+        await applyRemindersConfig()
         linkedCounts = links.countsByMapping
         if let creds = try? deps.credentials.loadAccount() {
             thingsBackend = deps.makeThings(creds.email, creds.password)
             thingsAccount = .signedIn(email: creds.email)
         }
         remindersAccess = await deps.reminders.access()
+        await refreshRemindersDetail()
         refreshPhase()
         await reloadCatalog()
         startObserversIfReady()
@@ -129,9 +136,12 @@ public final class SyncCoordinator {
         refreshPhase()
     }
 
+    /// Re-checks RemCTL (there is nothing to prompt for) and resumes syncing when it is ready.
     public func requestRemindersAccess() async {
+        await applyRemindersConfig()
         if let granted = try? await deps.reminders.requestAccess() { remindersAccess = granted }
         else { remindersAccess = await deps.reminders.access() }
+        await refreshRemindersDetail()
         refreshPhase()
         await reloadCatalog()
         startObserversIfReady()
@@ -140,12 +150,18 @@ public final class SyncCoordinator {
 
     /// Replaces the configuration, persists it, and runs a sync. New mappings are linked on this run.
     public func updateConfig(_ config: SyncConfig) async {
+        let pathChanged = config.remctlPath != self.config.remctlPath
         self.config = config
+        await applyRemindersConfig()
         let ids = Set(config.mappings.map(\.id))
         links.links.removeAll { !ids.contains($0.mappingId) }
         links.linkedMappings = links.linkedMappings.filter { ids.contains($0.key) }
         linkedCounts = links.countsByMapping
         persist()
+        if pathChanged {
+            await requestRemindersAccess()   // a new RemCTL path may fix (or break) readiness
+            return
+        }
         if !observerTasks.isEmpty { stopObservers(); startObserversIfReady() }
         await request(PendingWork(full: true))
     }
@@ -175,6 +191,18 @@ public final class SyncCoordinator {
     }
 
     // MARK: State
+
+    /// Pushes the RemCTL path, poll interval, and the enabled lists to the backend.
+    private func applyRemindersConfig() async {
+        guard let remctl = deps.remctl else { return }
+        await remctl.configure(executablePath: config.remctlPath, pollSeconds: config.remindersPollSeconds)
+        await remctl.setWatchedLists(config.mappings.filter(\.enabled).map(\.id))
+    }
+
+    private func refreshRemindersDetail() async {
+        if let remctl = deps.remctl { remindersDetail = await remctl.statusDetail() }
+        else { remindersDetail = remindersAccess == .granted ? "Ready" : "Reminders unavailable" }
+    }
 
     private var canSync: Bool { thingsBackend != nil && remindersAccess == .granted && !userPaused }
 
@@ -215,7 +243,7 @@ public final class SyncCoordinator {
                 await self?.request(PendingWork(pollThings: true))
             }
         })
-        // Reminders: debounced EKEventStoreChanged.
+        // Reminders: RemCTL export poll.
         let stream = reminders.changes()
         observerTasks.append(Task { [weak self] in
             for await _ in stream {
@@ -305,6 +333,7 @@ public final class SyncCoordinator {
         linkedCounts = links.countsByMapping
         append(report.log)
         reminderLists = report.reminderLists
+        Task { await applyRemindersConfig() }
         applyCatalog(report.snapshot)
         lastSync = Date()
         if forced { safetyHold = false }

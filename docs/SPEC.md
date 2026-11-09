@@ -1,20 +1,47 @@
 # Things Reminders Sync: specification
 
 A self-contained macOS menu bar app that keeps chosen Apple Reminders lists and Things 3 in two-way
-sync. No third-party dependencies, no server, no helper processes: one `.app` built from this
-SwiftPM package. Owner: Oliver Ames. Runs on his always-on Mac (home-server, macOS 27) or his
+sync. No third-party Swift dependencies and no server: one `.app` built from this SwiftPM package,
+which reads and writes Reminders through the separately installed RemCTL CLI. Owner: Oliver Ames. Runs on his always-on Mac (home-server, macOS 27) or his
 MacBook Pro.
 
 ## Change detection
 
-- **Reminders → app (push):** EventKit posts `EKEventStoreChanged` whenever the Reminders database
-  changes, including changes synced in from iPhone. It does not say what changed, so the app
-  re-reads the mapped lists (debounced ~1 s) and diffs against the last synced fingerprints.
+- **Reminders → app (poll):** RemCTL has no change notification. Every `remindersPollSeconds`
+  (default 10, 5 to 120) the app runs `remctl export --json` (all reminders, completed included),
+  hashes the content of the enabled lists' rows, and syncs when that hash changed (the first poll is a
+  baseline). Changes synced in from iPhone show up the same way.
+- **Synthesized modification time:** RemCTL rows carry no modification date. The app keeps a content
+  hash per reminder id (title, notes, due, completed, completion date, list) in memory and in
+  `~/Library/Application Support/ThingsRemindersSync/remctl-observed.json`. A new or changed hash stamps
+  `lastModified = now`; an unchanged one keeps its stored stamp. Conflict resolution ("later modification
+  wins") therefore has the resolution of the poll interval, and the first run treats every reminder as
+  modified at that moment.
 - **Things → app:** Things Cloud has no third-party push. Every `pollSeconds` (default 15) the app
   calls `GET /version/1/history/{key}` (one small request) and pulls only new history items when the
   head moved. Changed task ids come from the pulled change maps.
 - **Reconcile:** every `reconcileMinutes` (default 10), and on launch, wake, and "Sync Now", run a
   full two-way pass over every enabled mapping. This catches anything missed while asleep.
+
+## Reminders (RemCTL)
+
+`RemCTLReminders: RemindersBackend` (`Sources/SyncCore/Reminders/`). RemCTL (`~/bin/remctl`, then
+`/opt/homebrew/bin`, `/usr/local/bin`, or an explicit path in config) must be installed with its signed
+Capability Host authorized for Reminders; the app needs no Reminders permission and never prompts.
+
+- Transport: one long-lived `remctl mcp serve` child (JSON-RPC lines on stdio, handshake once, requests
+  serialized, 30 s timeout, restart once on EOF/crash/timeout, stderr drained). Tools used: `lists`,
+  `create_reminder`, `update_reminder`, `set_completion`, `delete_reminder`, `get_reminder`.
+- Reads: `remctl export --json` as a one-shot process, because MCP tool results are capped (about 170 KB,
+  which cuts the export to roughly a third of the rows). List titles in rows map to list ids through
+  the latest `lists` result; rows in lists whose title is shared by several lists are skipped and logged.
+  Subtasks are skipped. Ids are RemCTL's numeric ids as strings.
+- Due dates: `dueDate` plus `allDay` map to `DueDate` (the time part is ignored when all-day). A timed due
+  is written with an `alarm` at the same instant (mirroring the Things reminder); clearing a due also
+  clears the alarm. Any `recurrence` means repeating (not synced). Completion uses `set_completion`,
+  omitting `completion_date` for repeating reminders.
+- Access: `access()` is `.granted` when the MCP session starts and `lists` succeeds, otherwise `.denied`
+  with RemCTL's message in `SyncCoordinator.remindersDetail`.
 
 ## Things Cloud protocol
 
@@ -122,16 +149,16 @@ Now. Never empty the Things Trash. Never touch Reminders lists that are not mapp
 
 - Menu bar only (`LSUIElement`). Menu: status line (phase, last sync time), Sync Now, Pause/Resume,
   Settings…, Quit.
-- Settings window tabs: **Account** (Things Cloud email/password, verify, sign out; Reminders
-  access status + request button), **Lists** (every Reminders list with an enable toggle, a mode
+- Settings window tabs: **Account** (Things Cloud email/password, verify, sign out; RemCTL
+  status row with a Check Again button and an optional RemCTL path), **Lists** (every Reminders list with an enable toggle, a mode
   picker, a target picker of existing Things projects/areas/tags plus "New …" with a title, and the
-  linked-item count), **Options** (poll interval, reconcile interval, include completed on first
+  linked-item count), **Options** (Things poll interval, Reminders poll interval, reconcile interval, include completed on first
   link, propagate deletes, open at login via `SMAppService.mainApp`), **Activity** (log, newest
   first, with levels).
 - Credentials in the Keychain (generic password, service `com.oliverames.ThingsRemindersSync`).
 - Bundle id `com.oliverames.ThingsRemindersSync`, display name "Things Reminders Sync",
-  `NSRemindersFullAccessUsageDescription` set, signed with the Developer ID identity
-  (stable TCC identity across rebuilds), built by `scripts/build-app.sh`.
+  signed with the Developer ID identity and the hardened runtime, with no Reminders entitlement or usage
+  description (RemCTL holds the permission), built by `scripts/build-app.sh`.
 
 ## Module ownership
 
@@ -139,7 +166,7 @@ Now. Never empty the Things Trash. Never touch Reminders lists that are not mapp
 |---|---|---|
 | `Sources/SyncCore/Model/SharedTypes.swift` | orchestrator | contracts; do not change without approval |
 | `Sources/SyncCore/ThingsCloud/` | Things agent | client, base58 ids, validation, database decode, change builders; implements `ThingsBackend` |
-| `Sources/SyncCore/Reminders/` | engine agent | `EventKitReminders: RemindersBackend` |
+| `Sources/SyncCore/Reminders/` | engine agent | `RemCTLReminders: RemindersBackend` |
 | `Sources/SyncCore/Engine/` | engine agent | `SyncEngine` (pure logic against the two protocols), link store, fingerprints |
 | `Sources/SyncCore/App/SyncCoordinator.swift` | engine agent | fill in bodies; public API is fixed |
 | `Sources/SyncCore/App/Keychain.swift`, `StateStore.swift` | engine agent | |

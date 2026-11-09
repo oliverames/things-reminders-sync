@@ -340,3 +340,19 @@ private func projectWorld() async -> World {
     #expect(await w.reminders.all(in: "L1").isEmpty)
     #expect(await w.things.task("t2")?.trashed == false)
 }
+
+// Regression: on first link the reminder looks "modified now" (RemCTL has no modification date),
+// which must not let an empty reminder note wipe a Things note or retitle the Things item.
+@Test func firstLinkNeverOverwritesRicherThingsFields() async throws {
+    var w = await projectWorld()
+    await w.things.add(todo("t1", "Call Dr. Lee", project: "P1", notes: "**Bring** the referral", modified: early))
+    await w.things.add(todo("t2", "Pay rent", project: "P1", notes: "", modified: early))
+    await w.reminders.add(reminder("r1", "L1", "call dr. lee", notes: "", modified: late))
+    await w.reminders.add(reminder("r2", "L1", "Pay rent", notes: "Portal login in 1Password", modified: late))
+    try await w.sync()
+    #expect(await w.things.task("t1")?.notes == "**Bring** the referral")
+    #expect(await w.things.task("t1")?.title == "Call Dr. Lee")
+    #expect(await w.reminders.item("r1")?.notes == "**Bring** the referral")
+    #expect(await w.reminders.item("r1")?.title == "Call Dr. Lee")
+    #expect(await w.things.task("t2")?.notes == "Portal login in 1Password")
+}

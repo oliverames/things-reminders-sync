@@ -15,8 +15,8 @@ struct AccountTab: View {
                     Button("Sign Out", role: .destructive) { coordinator.signOut() }
                 }
             }
-            Section("Reminders") {
-                RemindersAccessRow(coordinator: coordinator)
+            Section("Reminders (RemCTL)") {
+                RemCTLRow(coordinator: coordinator)
             }
         }
         .formStyle(.grouped)
@@ -63,26 +63,47 @@ private struct SignInForm: View {
     }
 }
 
-private struct RemindersAccessRow: View {
+private struct RemCTLRow: View {
     let coordinator: SyncCoordinator
+    @State private var path = ""
+    @State private var isChecking = false
 
     var body: some View {
-        switch coordinator.remindersAccess {
-        case .granted:
-            Label("Access granted", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
-        case .notDetermined:
-            Label("Not requested yet", systemImage: "questionmark.circle").foregroundStyle(.secondary)
-            Button("Request Access") { Task { await coordinator.requestRemindersAccess() } }
-        case .denied:
-            Label("Access denied", systemImage: "xmark.octagon.fill").foregroundStyle(.red)
-            Text("Allow Things Reminders Sync in System Settings > Privacy & Security > Reminders.")
-                .font(.callout).foregroundStyle(.secondary)
-            Button("Open Privacy Settings") {
-                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Reminders") {
-                    NSWorkspace.shared.open(url)
+        Group {
+            if coordinator.remindersAccess == .granted {
+                Label(coordinator.remindersDetail, systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+            } else {
+                Label(coordinator.remindersDetail, systemImage: "xmark.octagon.fill").foregroundStyle(.red)
+                Text("Reminders is read through RemCTL. Install it and authorize its Capability Host (run remctl doctor).")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            TextField("RemCTL path (optional)", text: $path, prompt: Text("~/bin/remctl"))
+                .autocorrectionDisabled()
+                .onSubmit(applyPath)
+            HStack {
+                Button("Check Again") {
+                    isChecking = true
+                    Task {
+                        applyPath()
+                        await coordinator.requestRemindersAccess()
+                        isChecking = false
+                    }
                 }
+                .disabled(isChecking)
+                if isChecking { ProgressView().controlSize(.small) }
             }
         }
+        .onAppear { path = coordinator.config.remctlPath ?? "" }
+    }
+
+    /// Saves the path through `updateConfig`; clearing the field returns to the default locations.
+    private func applyPath() {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value: String? = trimmed.isEmpty ? nil : trimmed
+        guard value != coordinator.config.remctlPath else { return }
+        var config = coordinator.config
+        config.remctlPath = value
+        Task { await coordinator.updateConfig(config) }
     }
 }
 

@@ -14,6 +14,9 @@ struct OptionsTab: View {
                 Stepper(value: $draft.pollSeconds, in: 10...300, step: 5) {
                     LabeledContent("Check Things every", value: "\(draft.pollSeconds) seconds")
                 }
+                Stepper(value: $draft.remindersPollSeconds, in: 5...120, step: 5) {
+                    LabeledContent("Check Reminders every", value: "\(draft.remindersPollSeconds) seconds")
+                }
                 Stepper(value: $draft.reconcileMinutes, in: 5...120, step: 5) {
                     LabeledContent("Full reconcile every", value: "\(draft.reconcileMinutes) minutes")
                 }
@@ -46,6 +49,7 @@ struct OptionsTab: View {
             guard !Task.isCancelled else { return }
             var merged = coordinator.config
             merged.pollSeconds = new.pollSeconds
+            merged.remindersPollSeconds = new.remindersPollSeconds
             merged.reconcileMinutes = new.reconcileMinutes
             merged.includeCompletedOnFirstLink = new.includeCompletedOnFirstLink
             merged.propagateDeletes = new.propagateDeletes

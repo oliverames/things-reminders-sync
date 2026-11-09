@@ -1,7 +1,7 @@
 // swift-tools-version: 6.2
 import PackageDescription
 
-// No third-party dependencies: Foundation, EventKit, Security, ServiceManagement, and SwiftUI only.
+// No third-party dependencies: Foundation, CryptoKit, Security, ServiceManagement, and SwiftUI only.
 let package = Package(
     name: "ThingsRemindersSync",
     platforms: [.macOS(.v26)],

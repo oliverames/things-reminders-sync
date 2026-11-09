@@ -13,13 +13,13 @@ struct ListsTab: View {
         Form {
             if coordinator.thingsAccount == .signedOut || coordinator.remindersAccess != .granted {
                 Section {
-                    Label("Finish setup on the Account tab: sign in to Things Cloud and allow Reminders access.",
+                    Label("Finish setup on the Account tab: sign in to Things Cloud and make sure RemCTL is ready.",
                           systemImage: "info.circle")
                 }
             }
             if coordinator.reminderLists.isEmpty {
                 Section {
-                    Text("No Reminders lists found yet. Grant Reminders access, then reopen this tab.")
+                    Text("No Reminders lists found yet. Check RemCTL on the Account tab, then reopen this tab.")
                         .foregroundStyle(.secondary)
                 }
             } else {

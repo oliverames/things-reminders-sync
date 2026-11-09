@@ -168,7 +168,7 @@ public protocol ThingsBackend: Sendable {
 // MARK: - Reminders
 
 public struct ReminderList: Codable, Hashable, Sendable, Identifiable {
-    /// `EKCalendar.calendarIdentifier`.
+    /// RemCTL's numeric list id, as a string.
     public var id: String
     public var title: String
     /// `#RRGGBB`.
@@ -182,9 +182,9 @@ public struct ReminderList: Codable, Hashable, Sendable, Identifiable {
 }
 
 public struct ReminderItem: Codable, Hashable, Sendable, Identifiable {
-    /// `EKReminder.calendarItemIdentifier` (stable on this Mac).
+    /// RemCTL's numeric reminder id, as a string (stable).
     public var id: String
-    /// `calendarItemExternalIdentifier`, kept to re-find an item if the local id changes.
+    /// RemCTL `deepLink`, kept to re-find an item if the local id changes.
     public var externalId: String?
     public var listId: String
     public var title: String
@@ -221,7 +221,7 @@ public struct ReminderPatch: Codable, Hashable, Sendable {
 
 public enum RemindersAccess: String, Codable, Sendable { case notDetermined, granted, denied }
 
-/// The Reminders side as the engine sees it. `EventKitReminders` implements it; tests use a fake.
+/// The Reminders side as the engine sees it. `RemCTLReminders` implements it; tests use a fake.
 public protocol RemindersBackend: Sendable {
     func access() async -> RemindersAccess
     func requestAccess() async throws -> RemindersAccess
@@ -232,7 +232,7 @@ public protocol RemindersBackend: Sendable {
     func update(id: String, patch: ReminderPatch) async throws -> ReminderItem
     /// Removes the reminder. Missing ids are not an error.
     func delete(id: String) async throws
-    /// Yields once per (debounced) change notification from the Reminders database.
+    /// Yields when the Reminders content the engine watches changed (RemCTL polls; there is no push).
     func changes() -> AsyncStream<Void>
 }
 
@@ -248,7 +248,7 @@ public enum MappingMode: String, Codable, CaseIterable, Sendable {
 }
 
 public struct ListMapping: Codable, Hashable, Sendable, Identifiable {
-    /// Reminders list id (`EKCalendar.calendarIdentifier`).
+    /// Reminders list id (RemCTL numeric list id).
     public var id: String
     /// Last known list title, for display when the list is unavailable.
     public var listTitle: String
@@ -277,11 +277,29 @@ public struct SyncConfig: Codable, Hashable, Sendable {
     public var includeCompletedOnFirstLink: Bool
     /// Deleting on one side deletes (Reminders) or trashes (Things) on the other.
     public var propagateDeletes: Bool
+    /// Seconds between RemCTL exports that detect Reminders changes.
+    public var remindersPollSeconds: Int
+    /// Explicit path to the `remctl` executable; nil searches `~/bin`, `/opt/homebrew/bin`, `/usr/local/bin`.
+    public var remctlPath: String?
 
     public init(mappings: [ListMapping] = [], pollSeconds: Int = 15, reconcileMinutes: Int = 10,
-                includeCompletedOnFirstLink: Bool = false, propagateDeletes: Bool = true) {
+                includeCompletedOnFirstLink: Bool = false, propagateDeletes: Bool = true,
+                remindersPollSeconds: Int = 10, remctlPath: String? = nil) {
         self.mappings = mappings; self.pollSeconds = pollSeconds; self.reconcileMinutes = reconcileMinutes
         self.includeCompletedOnFirstLink = includeCompletedOnFirstLink; self.propagateDeletes = propagateDeletes
+        self.remindersPollSeconds = remindersPollSeconds; self.remctlPath = remctlPath
+    }
+
+    /// Older config files lack the RemCTL fields; they decode with the defaults.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        mappings = try c.decodeIfPresent([ListMapping].self, forKey: .mappings) ?? []
+        pollSeconds = try c.decodeIfPresent(Int.self, forKey: .pollSeconds) ?? 15
+        reconcileMinutes = try c.decodeIfPresent(Int.self, forKey: .reconcileMinutes) ?? 10
+        includeCompletedOnFirstLink = try c.decodeIfPresent(Bool.self, forKey: .includeCompletedOnFirstLink) ?? false
+        propagateDeletes = try c.decodeIfPresent(Bool.self, forKey: .propagateDeletes) ?? true
+        remindersPollSeconds = try c.decodeIfPresent(Int.self, forKey: .remindersPollSeconds) ?? 10
+        remctlPath = try c.decodeIfPresent(String.self, forKey: .remctlPath)
     }
 }
 
