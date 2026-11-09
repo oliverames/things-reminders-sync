@@ -11,7 +11,11 @@
 - Verified the published asset itself: the downloaded zip passes
   `spctl --assess` as "Notarized Developer ID", `stapler validate` succeeds,
   the version reads 0.1.0, and the release checksum matches the local one.
-- The always-on Mac deployment is still built by `scripts/build-app.sh` with
-  the PV3W52NDZ3 identity. Switching that install to the release build changes
-  the code signature, so expect a Keychain prompt for the stored Things
-  password, which a headless Mac can't answer.
+- The always-on Mac now runs the released build, which is signed by
+  84M4ZF255G, and `build-app.sh` defaults to that identity, so later deploys
+  keep the same signature. Changing the signing team invalidates the Keychain
+  item's access list. An SSH session can't write to the login Keychain, so the
+  item was re-added from the GUI session with a one-shot LaunchAgent that runs
+  `security add-generic-password -T <app>`, with the password passed in a
+  temporary file that is deleted afterwards. After that, the app read the item
+  with no prompt and synced a title change.

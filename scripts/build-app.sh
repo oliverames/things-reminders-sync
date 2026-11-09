@@ -12,7 +12,7 @@ BUNDLE_ID="${BUNDLE_ID:-com.oliverames.ThingsRemindersSync}"
 VERSION="${VERSION:-0.1.0}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
 # Set SIGN_IDENTITY to your own "Developer ID Application: ..." identity; without one the app is signed ad hoc.
-IDENTITY="${SIGN_IDENTITY:-Developer ID Application: Oliver Ames (PV3W52NDZ3)}"
+IDENTITY="${SIGN_IDENTITY:-Developer ID Application: Oliver Ames (84M4ZF255G)}"
 APP_DIR="$ROOT/.build/$APP_NAME.app"
 
 echo "Building ($CONFIG)..."
