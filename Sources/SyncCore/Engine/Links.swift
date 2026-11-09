@@ -111,6 +111,9 @@ public struct LinkStore: Codable, Hashable, Sendable {
     /// deleted item or duplicate a moved one. Full passes prune ids that no longer exist.
     public var detachedThingsIds: Set<String>
     public var detachedReminderIds: Set<String>
+    /// Links dropped because an item moved out of scope. When both items are back in scope the link is
+    /// restored (and syncs from its old fingerprint); if one item disappears, the other is freed.
+    public var parkedLinks: [LinkRecord] = []
 
     public init(links: [LinkRecord] = [], linkedMappings: [String: String] = [:],
                 detachedThingsIds: Set<String> = [], detachedReminderIds: Set<String> = []) {
@@ -124,6 +127,7 @@ public struct LinkStore: Codable, Hashable, Sendable {
         linkedMappings = try c.decodeIfPresent([String: String].self, forKey: .linkedMappings) ?? [:]
         detachedThingsIds = try c.decodeIfPresent(Set<String>.self, forKey: .detachedThingsIds) ?? []
         detachedReminderIds = try c.decodeIfPresent(Set<String>.self, forKey: .detachedReminderIds) ?? []
+        parkedLinks = try c.decodeIfPresent([LinkRecord].self, forKey: .parkedLinks) ?? []
     }
 
     public func count(mappingId: String) -> Int { links.reduce(0) { $0 + ($1.mappingId == mappingId ? 1 : 0) } }

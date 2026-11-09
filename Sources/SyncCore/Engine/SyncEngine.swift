@@ -140,6 +140,7 @@ private final class SyncPass {
         await migrateRetargetedMappings()
         buildThingsScope()
 
+        reattachParkedLinks()
         let linksAtStart = store.links
         let linkedThings = Set(linksAtStart.map(\.thingsId))
         let linkedReminders = Set(linksAtStart.map(\.reminderId))
@@ -384,7 +385,42 @@ private final class SyncPass {
         return nil
     }
 
-    func unlink(_ link: LinkRecord, _ reason: String) {
+    /// Restores parked links whose items are both back in a mapped place, and frees an item whose
+    /// parked partner no longer exists. Runs before existing links are processed, so a restored link
+    /// syncs whatever changed meanwhile against its old fingerprint (and follows a move to another list).
+    func reattachParkedLinks() {
+        var keep: [LinkRecord] = []
+        for parked in store.parkedLinks {
+            let task = snapshot.tasks[parked.thingsId].flatMap { $0.trashed ? nil : $0 }
+            let reminder = findReminder(parked)
+            switch (task, reminder) {
+            case let (task?, reminder?):
+                let tm = thingsScope[task.id], rm = activeById[reminder.listId]?.id
+                guard tm != nil, rm != nil else { keep.append(parked); continue }   // still out of scope: stay parked
+                var link = parked
+                link.reminderId = reminder.id
+                if activeById[link.mappingId] == nil { link.mappingId = tm! }
+                store.links.append(link)
+                store.detachedThingsIds.remove(task.id)
+                store.detachedReminderIds.remove(parked.reminderId)
+                store.detachedReminderIds.remove(reminder.id)
+                report.linked += 1
+                log(.info, "Relinked \"\(task.title)\": both items are back in synced places")
+            case (nil, nil):
+                store.detachedThingsIds.remove(parked.thingsId)
+                store.detachedReminderIds.remove(parked.reminderId)
+            case (let task?, nil):
+                store.detachedThingsIds.remove(task.id)          // partner gone: sync as a new item
+            case (nil, let reminder?):
+                store.detachedReminderIds.remove(reminder.id)
+                store.detachedReminderIds.remove(parked.reminderId)
+            }
+        }
+        store.parkedLinks = keep
+    }
+
+    func unlink(_ link: LinkRecord, _ reason: String, park: Bool = false) {
+        if park { store.parkedLinks.append(link) }
         removedLinks.insert(link.id)
         store.detachedThingsIds.insert(link.thingsId)
         store.detachedReminderIds.insert(link.reminderId)
@@ -419,7 +455,7 @@ private final class SyncPass {
         if reminder.isRepeating || task.isRepeating { unlink(link, "repeating item"); return }
         let rm = activeById[reminder.listId]?.id
         let tm = thingsScope[task.id]
-        guard let rm, let tm else { unlink(link, "moved out of scope"); return }
+        guard let rm, let tm else { unlink(link, "moved out of scope", park: true); return }
 
         var destination: ListMapping?
         var movedThings = false   // true: the Things side must follow the reminder

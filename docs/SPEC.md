@@ -215,3 +215,29 @@ Now. Never empty the Things Trash. Never touch Reminders lists that are not mapp
 
 Tests use Swift Testing (`import Testing`). Unit tests never touch the network, the real Keychain,
 or real Reminders. No test fixtures may contain Oliver's real task data.
+
+## Moving items (reference)
+
+"Synced place" means a project, area, tag, or heading that an enabled list maps to.
+
+| Move in Things | Result in Reminders |
+|---|---|
+| Under another heading, same project | Reminder moves to the matching section (created if missing; lists with sections off ignore headings) |
+| Out from under a heading, same project | No change (RemCTL cannot remove a section); logged once, not reverted |
+| To another synced project, area, or heading | Reminder moves to that list |
+| Gains another synced list's tag | Stays with its list (one list per item; heading mappings first, then list order) |
+| To an unsynced place (Inbox, other project or area) | Link parked; both items stay. Moving it back into a synced place relinks it |
+| To the Trash | Reminder deleted (Recently Deleted) |
+
+| Move in Reminders | Result in Things |
+|---|---|
+| To another section | To-do moves under the matching heading (at the next full reconcile) |
+| To a list synced to a project, area, or heading | To-do moves there |
+| To a list synced to a tag | To-do gets the tag and moves to the Inbox (otherwise two lists would claim it) |
+| To an unsynced list | Link parked; both items stay. Moving it back relinks it |
+| Deleted | To-do moved to the Things Trash |
+
+Parked links restore when both items are in synced places again (the side that moved pulls the other
+along). If one item of a parked pair disappears, the other is freed and syncs as a new item. Pairs
+unlinked because deletes are not propagated, or because an item repeats, stay detached so nothing is
+resurrected.
