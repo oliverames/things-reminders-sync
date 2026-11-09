@@ -16,6 +16,11 @@ actor FakeRemCTL: RemCTLTransport {
     var listSections: [Int: [String]] = [:]
     private(set) var cliCalls: [[String]] = []
     var failShow = false
+    /// How many `get_reminder` calls after an `update_reminder` still return the row as it was before the update
+    /// (private ReminderKit writes land a moment after the call returns).
+    var staleReads = 0
+    private var beforeUpdate: [Int: JSONValue] = [:]
+    func setStaleReads(_ n: Int) { staleReads = n }
 
     static func list(_ id: Int, _ title: String, group: Bool = false, groceries: Bool = false) -> JSONValue {
         ["id": .number(Double(id)), "title": .string(title), "isGroup": .bool(group), "isGroceries": .bool(groceries),
@@ -72,6 +77,7 @@ actor FakeRemCTL: RemCTLTransport {
             return ["status": "created", "id": .number(Double(nextId))]
         case "update_reminder":
             let id = arguments["reminder_id"]!.int!
+            beforeUpdate[id] = rows[id]
             if let t = arguments["title"] { edit(id, "title", t) }
             if let n = arguments["notes"] { edit(id, "notes", n) }
             // Private metadata: only honoured with `private: true`, like RemCTL (without it a url would land in the notes).
@@ -97,6 +103,7 @@ actor FakeRemCTL: RemCTLTransport {
             let sections = (listSections[id] ?? []).map { JSONValue.object(["id": .string("S-\($0)"), "name": .string($0)]) }
             return ["id": .number(Double(id)), "sections": .array(sections)]
         case "get_reminder":
+            if staleReads > 0, let old = beforeUpdate[arguments["reminder_id"]?.int ?? 0] { staleReads -= 1; return old }
             guard let row = rows[arguments["reminder_id"]?.int ?? 0] else { throw RemCTLError.tool("Error: #\(arguments["reminder_id"]?.int ?? 0) not found") }
             return row
         case "delete_reminder":

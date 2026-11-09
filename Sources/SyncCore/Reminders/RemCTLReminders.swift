@@ -221,7 +221,28 @@ public actor RemCTLReminders: RemindersBackend {
             }
             _ = try await transport.callTool("set_completion", arguments: done)
         }
-        return try await fetch(id: current, listHint: patch.listId)
+        var item = try await fetch(id: current, listHint: patch.listId)
+        // Private (ReminderKit) writes land a moment after the call returns, so an immediate read can still show
+        // the old tags, flag or link (seen live on 2026-11-09: 5 of 7 tag writes read back stale, all had landed).
+        // Re-read briefly before the engine decides a field did not take.
+        if !privateFields.isEmpty {
+            for delay in privateReadBackDelays where !Self.privateFieldsLanded(patch, in: item) {
+                try await Task.sleep(for: delay)
+                item = try await fetch(id: current, listHint: patch.listId)
+            }
+        }
+        return item
+    }
+
+    /// Waits between re-reads after a private write.
+    private var privateReadBackDelays: [Duration] = [.milliseconds(300), .milliseconds(700), .milliseconds(1500)]
+    func setPrivateReadBackDelays(_ delays: [Duration]) { privateReadBackDelays = delays }
+
+    static func privateFieldsLanded(_ patch: ReminderPatch, in item: ReminderItem) -> Bool {
+        if let tags = patch.tags, Set(tags) != Set(item.tags) { return false }
+        if let flagged = patch.flagged, flagged != item.flagged { return false }
+        if patch.url != nil, item.url == nil { return false }
+        return true
     }
 
     public func delete(id: String) async throws {

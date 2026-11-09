@@ -59,6 +59,28 @@ import Testing
         #expect(item.url == "https://example.com/a" && item.tags == ["Home", "Work"] && item.flagged && item.notes == "body")
     }
 
+    /// Live on 2026-11-09, 5 of 7 tag writes read back stale right after the call although all had landed.
+    @Test func aStaleReadAfterAPrivateWriteIsReread() async throws {
+        let fake = FakeRemCTL()
+        await fake.put(FakeRemCTL.row(5, "X"))
+        await fake.setStaleReads(2)
+        let backend = makeBackend(fake)
+        await backend.setPrivateReadBackDelays([.zero, .zero, .zero])
+        let item = try await backend.update(id: "5", patch: ReminderPatch(flagged: true, tags: ["Post"]))
+        #expect(item.tags == ["Post"] && item.flagged)
+        #expect(await fake.calls("get_reminder").count == 3)
+    }
+
+    @Test func aPlainWriteIsReadOnce() async throws {
+        let fake = FakeRemCTL()
+        await fake.put(FakeRemCTL.row(5, "X"))
+        await fake.setStaleReads(5)
+        let backend = makeBackend(fake)
+        await backend.setPrivateReadBackDelays([.zero, .zero, .zero])
+        _ = try await backend.update(id: "5", patch: ReminderPatch(title: "Y"))
+        #expect(await fake.calls("get_reminder").count == 1)
+    }
+
     @Test func emptyTagsClearThemAndUnflagIsSent() async throws {
         let fake = FakeRemCTL()
         await fake.put(FakeRemCTL.row(5, "X", ["tags": ["A"], "flagged": true]))
