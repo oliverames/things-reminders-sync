@@ -1,5 +1,23 @@
 # Worklog
 
+## 2026-11-09: per-field conflict resolution (audit finding M8)
+
+A field both sides changed now goes to the side that changed that field later, instead of comparing one time
+per item. A dry run on home-server against live data planned no changes. Tests: `swift test --parallel`, 304 passing; new ones in `PerFieldConflictTests.swift`.
+
+- Things: `ThingsDatabase.stampFields` records, per field, the `md` of the history item that last changed its value
+  (`ThingsTask.fieldModified`, read through `modified(_:)`). A create stamps every field; a checklist item's `md`
+  stamps its to-do's checklist. It compares values, not keys, so a client that resends an unchanged key moves no time.
+- Reminders: `remctl-observed.json` keeps a digest and stamp per field next to the old hash and stamp
+  (`ReminderItem.fieldModified`). An old file decodes and seeds every field from its one stamp. Polls still write nothing.
+- Merge: title, due date, completion, section, notes text, a move between lists, and a template pair's due and rule
+  use the field's two times; the tie still goes to Things. Flag, tags, checklist and first-link rules are unchanged.
+  Items without field times (the test fakes) fall back to the item time, so the old tests hold.
+- No Things Cloud write shape changed. README and SPEC state the per-field rule and its limit: a Reminders time is
+  when the app first saw the change, exact to the poll interval and late after sleep or a restart.
+- Not verified against the real apps: whether Things always sends `md` on updates from every client, and whether a
+  checklist change also moves its to-do's `md`.
+
 ## 2026-11-09: checklist writes on by default
 
 Completing, renaming and removing a checklist item in the Things 3.24.2 Mac app was read back from history index 1644

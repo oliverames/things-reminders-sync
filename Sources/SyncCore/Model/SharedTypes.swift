@@ -54,6 +54,15 @@ public enum ThingsChecklistChange: Codable, Hashable, Sendable {
     case delete(id: String)
 }
 
+/// A synced field with its own modification time, used to settle a field both sides changed (docs/SPEC.md,
+/// "Link state and conflict rules"). Raw values are the keys of `fieldModified` and of `remctl-observed.json`.
+public enum SyncField: String, Codable, Sendable, CaseIterable {
+    case title, notes, due, completion
+    /// Where the item sits: Things project, heading and area; Reminders list and section.
+    case placement
+    case tags, flagged, rule, url, checklist
+}
+
 public struct ThingsTask: Codable, Hashable, Sendable, Identifiable {
     public var id: String
     public var kind: ThingsTaskKind
@@ -77,6 +86,9 @@ public struct ThingsTask: Codable, Hashable, Sendable, Identifiable {
     public var tagIds: [String]
     public var creationDate: Date?
     public var modificationDate: Date?
+    /// Per field (`SyncField` raw value): the `md` of the history item that last changed it. Nil for tasks that were
+    /// not folded from history; read it through `modified(_:)`.
+    public var fieldModified: [String: Date]?
     /// True for a repeating template (it holds `rr`) and for each occurrence generated from one (`rt`).
     public var isRepeating: Bool
     /// The template's repeat rule (`rr`), when it is one of the shapes in docs/RECURRENCE.md; nil for
@@ -111,6 +123,13 @@ public struct ThingsTask: Codable, Hashable, Sendable, Identifiable {
         self.creationDate = creationDate; self.modificationDate = modificationDate; self.isRepeating = isRepeating
         self.recurrence = recurrence; self.templateId = templateId; self.nextDay = nextDay
         self.instanceDay = instanceDay; self.instancesCreated = instancesCreated
+    }
+
+    /// When `field` last changed. Things has no flag or link of its own: the flag is a tag and the link is a line of
+    /// the notes. A field with no time of its own falls back to the to-do's `md`, then its creation.
+    public func modified(_ field: SyncField) -> Date? {
+        let own: SyncField = field == .flagged ? .tags : field == .url ? .notes : field
+        return fieldModified?[own.rawValue] ?? modificationDate ?? creationDate
     }
 
     /// A repeating template: it repeats and is not itself an occurrence.
@@ -303,6 +322,9 @@ public struct ReminderItem: Codable, Hashable, Sendable, Identifiable {
     public var completed: Bool
     public var completionDate: Date?
     public var lastModified: Date?
+    /// Per field (`SyncField` raw value): when the app first saw the field's current value. Nil when the backend
+    /// keeps no per-field times; read it through `modified(_:)`.
+    public var fieldModified: [String: Date]?
     public var isRepeating: Bool
     /// The repeat rule when RemCTL's export object is one this app can represent; nil for other rules
     /// (then `isRepeating` is still true).
@@ -344,6 +366,9 @@ public struct ReminderItem: Codable, Hashable, Sendable, Identifiable {
         self.due = due; self.completed = completed; self.completionDate = completionDate
         self.lastModified = lastModified; self.isRepeating = isRepeating; self.section = section
     }
+
+    /// When the app first saw `field` at its current value; falls back to the reminder's one stamp.
+    public func modified(_ field: SyncField) -> Date? { fieldModified?[field.rawValue] ?? lastModified }
 }
 
 public struct ReminderPatch: Codable, Hashable, Sendable {

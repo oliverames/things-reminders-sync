@@ -11,15 +11,29 @@ always-on Mac.
   (default 10, 5 to 120) the app runs `remctl export --json` (all reminders, completed included),
   hashes the content of the enabled lists' rows, and syncs when that hash changed (the first poll is a
   baseline). Changes synced in from iPhone show up the same way.
-- **Synthesized modification time:** RemCTL rows carry no modification date. The app keeps a content
-  hash per reminder id (title, notes, due, completed, completion date, list) in memory and in
-  `~/Library/Application Support/ThingsRemindersSync/remctl-observed.json`. A new or changed hash stamps
-  `lastModified = now`; an unchanged one keeps its stored stamp. Conflict resolution ("later modification
-  wins") therefore has the resolution of the poll interval, and the first run treats every reminder as
-  modified at that moment. The same holds after sleep or a restart: a reminder edited in the meantime is
-  stamped when the app next reads it. A read of some lists never stamps the rows of a section-mirroring
-  list whose sections that read did not load (hashing them without their section would mark every
-  sectioned reminder there as modified now).
+- **Synthesized modification time:** RemCTL rows carry no modification date. The app keeps, per reminder id,
+  a content hash with one stamp (title, notes, due, completed, completion date, list) and a digest with its
+  own stamp for each field: title, notes, due, completion, placement (list and section), repeat rule, link,
+  tags, flag and subtasks. They live in memory and in
+  `~/Library/Application Support/ThingsRemindersSync/remctl-observed.json`. A field whose digest is new or
+  changed is stamped `now`; an unchanged one keeps its stamp. `lastModified` is the same for the whole
+  reminder. A field's time is therefore when the app first noticed the change: accurate to the poll interval
+  while the app runs, and later than the real edit after sleep or a restart, because a field edited in the
+  meantime is stamped when the app next reads it. The first run treats every field as modified at that
+  moment. Stamps are written by reads and by the read-back after a write, never by the change poll, which
+  only hashes the export. Subtasks are stamped by export reads only (a single `get_reminder` row does not
+  list them). A read of some lists never stamps the rows of a section-mirroring list whose sections that
+  read did not load (hashing them without their section would mark every sectioned reminder there as
+  modified now). A file from before per-field stamps (one hash and one stamp per reminder) still decodes:
+  each field of an otherwise unchanged reminder starts from that one stamp, and a reminder that changed
+  while the old version ran has every field stamped now.
+- **Things modification time per field:** while history is folded into to-dos, each field (title, notes,
+  When day and reminder time, completion, placement, tags, repeat rule) records the `md` of the history
+  item that last changed its value; a create stamps every field. A key an item repeats with the value the
+  to-do already has does not count, and an item without `md` counts as the last known `md`. A checklist
+  item's own `md` is the time of its to-do's checklist (a removal carries none). The flag is a tag and the
+  link is a line of the notes, so they use the tag and notes times. A field with no time of its own falls
+  back to the to-do's `md`, then its creation date.
 - **Things → app:** Things Cloud has no third-party push. Every `pollSeconds` (default 15) the app
   calls `GET /version/1/history/{key}` (one small request) and pulls only new history items when the
   head moved. Changed task ids come from the pulled change maps.
@@ -215,7 +229,7 @@ Things note, and Things only with text the user edited in Reminders (or with the
 **Notes.** Things is authoritative for Markdown. Reminders gets `NoteFormatting.plainText(fromMarkdown:)` of the Things body.
 Three-way per side against the fingerprint: if the two notes already render to each other nothing is written (including a
 Markdown-only edit in Things, whose plain text did not change); a Things edit renders to Reminders; only an actual edit of the
-Reminders notes replaces the Things notes, with that plain text, verbatim. Both edited: the later modification wins and a
+Reminders notes replaces the Things notes, with that plain text, verbatim. Both edited: the later edit of the notes wins (see the conflict rules) and a
 `.warning` is logged. First link: Things keeps its text when both have text, an empty note never replaces a filled one, and the links are united.
 Existing linked items with plain notes render to themselves; items whose Markdown was copied verbatim by older versions stay as
 they are until one side is edited.
@@ -260,7 +274,8 @@ validator are in docs/RECURRENCE.md; code in `Engine/RepeatSync.swift`.
 - Completing the occurrence in Things completes the reminder without a date, so it advances itself.
   A reminder whose due moves to the rule's next occurrence (same time of day) is an advance: the open
   occurrence for the old day is completed. Any other due change is a reschedule.
-- Rule edits copy the changed side's rule; both changed means the later edit wins. A counted end
+- Rule edits copy the changed side's rule; both changed means the later edit of the rule wins. A due both sides moved goes
+  to the later move (the open occurrence's time on the Things side, else the template's). A counted end
   (`rc`/`count`) is masked when comparing, because Reminders decrements it on each completion.
 - Fallback A (a Things rule Reminders cannot hold, such as after completion): the template gets no
   reminder and its occurrences sync as plain pairs. Fallback B (a Reminders rule with no verified
@@ -288,7 +303,7 @@ structure: the reminder's **section** and the to-do's **heading**. The to-do's g
 that heading is in the target project and not trashed, else none (directly in the project). The reminder's group is its
 section. Groups compare trimmed and case-insensitively; writes keep the original spelling. The group is part of the
 link fingerprint (`group`; links saved before it existed decode it as none) and merges like any field: one side changed
-since the base, copy; both changed, the later modification wins. On first link a group beats none, and two different
+since the base, copy; both changed, the later move wins (placement time). On first link a group beats none, and two different
 groups go to Things. With `syncSections` off, groups are ignored and nothing moves between headings or sections.
 
 - To Things: no group places the to-do directly in the project; a group places it under the existing heading of that name
@@ -319,10 +334,14 @@ For each linked pair on a pass:
 
 1. Compute the current fingerprint of each side.
 2. Neither changed → nothing. One side changed → copy its changed fields to the other side.
-3. Both changed → per field, the side with the later modification date wins. That date is per item, not per
-   field: Things `md` is the last change to anything on the to-do, and the Reminders time is synthesized (see
-   Change detection), so it is the moment the app first saw the change. A field edited later on one side can
-   therefore lose to an unrelated later edit of the same item on the other side. Log a `.warning` naming the item.
+3. A field both sides changed → the side that changed that field later wins; on a tie Things wins. Each
+   side has a time per field (see Change detection): for Things the `md` of the history item that last
+   changed the field, for Reminders the moment the app first saw the field change. Title, due date,
+   completion, section, notes text, a move to another list and a repeat rule are settled this way. So a
+   rename in Things at 10:05 and a new due date in Reminders at 10:06 both survive, where one time per item
+   would have given Reminders the title as well. The Reminders time is only as exact as the poll interval,
+   and later than the real edit when the Mac was asleep or the app was not running. The flag, tags,
+   checklist and the first-link rules use no times (their own rules above). Log a `.warning` naming the item.
 4. After a successful write, store the new fingerprint, so the echo from the other side is a no-op.
    This is the loop guard; there are no other flags.
 

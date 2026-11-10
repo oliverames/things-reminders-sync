@@ -10,14 +10,21 @@ import os
 ///   capped, which cuts a full export to a fraction of the rows, so the export runs as a one-shot process.
 ///   Rows name their list by title; lists that share a title are told apart with one `export --list-id` run each.
 /// - A write whose answer is lost is never sent again: the reminder is re-read to see whether it landed.
-/// - RemCTL has no modification date, so `lastModified` is synthesized: a content hash per reminder id
-///   (title, notes, due, completion, list) is kept in memory and in `remctl-observed.json`. When a hash is
-///   new or changed the item is stamped with the time it was first seen that way; otherwise the stored
-///   stamp is kept. Conflict resolution therefore has the resolution of the poll interval, and the first
-///   run after install treats every reminder as modified "now".
+/// - RemCTL has no modification date, so modification times are synthesized: a digest per reminder id and per
+///   field (`SyncField`) is kept in memory and in `remctl-observed.json`. A field whose digest is new or changed
+///   is stamped with the time it was first seen that way; an unchanged one keeps its stamp. `lastModified` is the
+///   same for the reminder as a whole. Conflict resolution therefore has the resolution of the poll interval, and
+///   the first run after install treats every reminder as modified "now".
 /// - There is no push, so `changes()` polls the export and yields when the watched lists' content changes.
 public actor RemCTLReminders: RemindersBackend {
-    private struct Observed: Codable, Equatable { var hash: String; var stamp: Date }
+    struct FieldStamp: Codable, Equatable { var hash: String; var stamp: Date }
+    /// One reminder in `remctl-observed.json`. `fields` is missing in files written before per-field stamps; such an
+    /// entry seeds every field with its one `stamp` (see `observe(item:)`).
+    struct Observed: Codable, Equatable {
+        var hash: String
+        var stamp: Date
+        var fields: [String: FieldStamp]?
+    }
 
     private let transport: any RemCTLTransport
     private let stateURL: URL
@@ -630,23 +637,37 @@ public actor RemCTLReminders: RemindersBackend {
             guard let list = lists[row.id] else { continue }
             if sectionLists.contains(list), !sectionsLoaded.contains(list) { continue }
             let section = sectionLists.contains(list) ? sections[row.id] : nil
-            items.append(observe(item: Self.item(row, listId: list, section: section, subtasks: subtasks[row.id] ?? []), persist: false))
+            items.append(observe(item: Self.item(row, listId: list, section: section, subtasks: subtasks[row.id] ?? []),
+                                 subtasksKnown: true, persist: false))
         }
         for id in observed.keys where !seen.contains(id) { observed[id] = nil }
         persistObserved()
         return items
     }
 
-    private func observe(item: ReminderItem, persist: Bool = true) -> ReminderItem {
+    /// Stamps the item and each of its fields. `subtasksKnown` is true for export reads only: a `get_reminder` row
+    /// does not list subtasks, so a single read leaves the subtask stamp alone.
+    private func observe(item: ReminderItem, subtasksKnown: Bool = false, persist: Bool = true) -> ReminderItem {
         loadObservedIfNeeded()
         let hash = Self.contentHash(item)
-        var stamp = observed[item.id]?.stamp ?? clock()
-        if observed[item.id]?.hash != hash {
-            stamp = clock()
-            observed[item.id] = Observed(hash: hash, stamp: stamp)
+        let now = clock()
+        let old = observed[item.id]
+        let unchanged = old?.hash == hash
+        let stamp = unchanged ? old!.stamp : now
+        // A field with no stamp yet (an entry from before per-field stamps, or subtasks first read now) is as old as
+        // the reminder's one stamp when the reminder is otherwise unchanged; else it cannot be told apart from an edit.
+        var fields = old?.fields ?? [:]
+        for (field, value) in Self.fieldDigests(item) where subtasksKnown || field != .checklist {
+            if let known = fields[field.rawValue] {
+                if known.hash != value { fields[field.rawValue] = FieldStamp(hash: value, stamp: now) }
+            } else {
+                fields[field.rawValue] = FieldStamp(hash: value, stamp: stamp)
+            }
         }
+        observed[item.id] = Observed(hash: hash, stamp: stamp, fields: fields)
         var result = item
         result.lastModified = stamp
+        result.fieldModified = fields.mapValues(\.stamp)
         if persist { persistObserved() }
         return result
     }
@@ -698,6 +719,26 @@ public actor RemCTLReminders: RemindersBackend {
         // Subtasks are left out on purpose: `get_reminder` rows do not list them, and the stamp only decides which side's
         // edit is newer; subtasks merge without it.
         return sha(parts.joined(separator: "\u{1F}"))
+    }
+
+    /// A short digest of each field's value (the file never holds the text itself).
+    static func fieldDigests(_ item: ReminderItem) -> [SyncField: String] {
+        let sep = "\u{1F}"
+        let due = item.due.map { "\($0.day)/\($0.minutes.map(String.init) ?? "-")" } ?? "-"
+        let completion = item.completionDate.map { String(Int($0.timeIntervalSince1970)) } ?? "-"
+        let values: [SyncField: String] = [
+            .title: item.title,
+            .notes: item.notes,
+            .due: due,
+            .completion: (item.completed ? "1" : "0") + sep + completion,
+            .placement: item.listId + sep + (item.section ?? ""),
+            .rule: item.recurrence.map(stableDescription) ?? (item.isRepeating ? "?" : ""),
+            .url: item.url ?? "",
+            .tags: item.tags.sorted().joined(separator: ","),
+            .flagged: item.flagged ? "1" : "0",
+            .checklist: item.subtasks.map { $0.title + sep + ($0.completed ? "1" : "0") }.sorted().joined(separator: sep + sep),
+        ]
+        return values.mapValues { String(sha($0).prefix(16)) }
     }
 
     /// Deterministic text for a rule (Swift's `hashValue` changes on every launch and these hashes are persisted).

@@ -573,7 +573,14 @@ final class SyncPass {
             let follow: Side
             if thingsMoved && !reminderMoved { follow = .things }
             else if reminderMoved && !thingsMoved { follow = .reminders }
-            else { follow = laterSide(reminder.lastModified, task.modificationDate) }
+            else {
+                // Both moved: the later move wins. A tag-mode list moves a to-do by its tags.
+                var moved = task.modified(.placement)
+                if activeById[tm]?.mode == .tag || activeById[link.mappingId]?.mode == .tag, let tagged = task.modified(.tags) {
+                    moved = max(moved ?? tagged, tagged)
+                }
+                follow = laterSide(reminder.modified(.placement), moved)
+            }
             if follow == .things { destination = activeById[tm]; movedReminder = true }
             else { destination = activeById[rm]; movedThings = true }
         }
@@ -719,19 +726,24 @@ final class SyncPass {
         return .things
     }
 
+    /// The side that changed `field` later (each side's own time for that field; see `SyncField`).
+    func laterSide(_ field: SyncField, _ r: ReminderItem, _ t: ThingsTask) -> Side {
+        laterSide(r.modified(field), t.modified(field))
+    }
+
     /// Per-field three-way merge. `base == nil` (first link) treats every differing field as a conflict.
+    /// A field both sides changed goes to the side that changed that field later.
     func merge(base: Fingerprint?, reminder r: ReminderItem, task t: ThingsTask, group: GroupInput? = nil) -> MergePlan {
         let rf = Fingerprint(reminder: r, days: days)
         let tf = Fingerprint(things: t, days: days)
         var plan = MergePlan(fingerprint: rf)
-        let later = laterSide(r.lastModified, t.modificationDate)
 
-        func decide(_ field: String, equal: Bool, rChanged: Bool, tChanged: Bool, tiebreak: Side? = nil) -> Side? {
+        func decide(_ field: String, _ time: SyncField, equal: Bool, rChanged: Bool, tChanged: Bool, tiebreak: Side? = nil) -> Side? {
             if equal { return nil }
             if rChanged && !tChanged { return .reminders }
             if tChanged && !rChanged { return .things }
             if base != nil { plan.conflicts.append(field) }
-            return tiebreak ?? later
+            return tiebreak ?? laterSide(time, r, t)
         }
 
         // First link (no base) is conservative: modification times are not comparable yet (RemCTL
@@ -740,7 +752,7 @@ final class SyncPass {
         // and completed beats open.
         let firstLink = base == nil
         // Title
-        let titleSide = decide("title", equal: rf.title == tf.title,
+        let titleSide = decide("title", .title, equal: rf.title == tf.title,
                                rChanged: base.map { rf.title != $0.title } ?? true,
                                tChanged: base.map { tf.title != $0.title } ?? true,
                                tiebreak: firstLink ? .things : nil)
@@ -752,7 +764,7 @@ final class SyncPass {
         // Due date. On first link a missing date never overrides a real one ("no due date" rule).
         var dueTiebreak: Side?
         if base == nil { if rf.due == nil { dueTiebreak = .things } else if tf.due == nil { dueTiebreak = .reminders } }
-        let dueSide = decide("due date", equal: rf.due == tf.due,
+        let dueSide = decide("due date", .due, equal: rf.due == tf.due,
                              rChanged: base.map { rf.due != $0.due } ?? true,
                              tChanged: base.map { tf.due != $0.due } ?? true, tiebreak: dueTiebreak)
         switch dueSide {
@@ -761,7 +773,7 @@ final class SyncPass {
         case nil: break
         }
         // Completion
-        let compSide = decide("completion", equal: !Fingerprint.completionDiffers(rf, tf),
+        let compSide = decide("completion", .completion, equal: !Fingerprint.completionDiffers(rf, tf),
                               rChanged: base.map { Fingerprint.completionDiffers(rf, $0) } ?? true,
                               tChanged: base.map { Fingerprint.completionDiffers(tf, $0) } ?? true,
                               tiebreak: firstLink ? (tf.completed || !rf.completed ? .things : .reminders) : nil)
@@ -798,7 +810,7 @@ final class SyncPass {
                     if rChanged && !(firstLink && rg == nil) { side = .reminders }
                     else if firstLink { plan.fingerprint.group = rg }
                 } else if rChanged || tChanged {
-                    side = decide("section", equal: false, rChanged: rChanged, tChanged: tChanged,
+                    side = decide("section", .placement, equal: false, rChanged: rChanged, tChanged: tChanged,
                                   tiebreak: firstLink ? (rg == nil ? .things : tg == nil ? .reminders : .things) : nil)
                 }
                 switch side {
@@ -810,7 +822,7 @@ final class SyncPass {
                 }
             }
         }
-        mergeFields(into: &plan, base: base, reminder: r, task: t, later: later)
+        mergeFields(into: &plan, base: base, reminder: r, task: t)
         return plan
     }
 

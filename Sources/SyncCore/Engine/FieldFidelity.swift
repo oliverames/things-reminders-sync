@@ -283,9 +283,10 @@ extension SyncPass {
 
     // MARK: Merge hook
 
-    /// Adds the notes, flag, tag and checklist decisions to a plan. `later` is the side with the newer edit.
-    func mergeFields(into plan: inout MergePlan, base: Fingerprint?, reminder r: ReminderItem, task t: ThingsTask, later: Side) {
-        let n = decideNotes(base: base, reminder: r, task: t, later: later)
+    /// Adds the notes, flag, tag and checklist decisions to a plan. Notes edited on both sides go to the side whose
+    /// notes changed later; the flag, tags and checklist merge by their own rules and use no times.
+    func mergeFields(into plan: inout MergePlan, base: Fingerprint?, reminder r: ReminderItem, task t: ThingsTask) {
+        let n = decideNotes(base: base, reminder: r, task: t, later: laterSide(.notes, r, t))
         plan.reminderPatch.notes = n.reminderNotes
         plan.reminderPatch.url = n.reminderURL
         plan.thingsPatch.notes = n.thingsNotes

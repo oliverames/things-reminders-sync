@@ -70,7 +70,8 @@ extension SyncPass {
         let base = baseFP.due
         let rDue = r.due
         let occurrences = openOccurrences(of: t.id)
-        let later = laterSide(r.lastModified, occurrences.first?.modificationDate ?? t.modificationDate)
+        // The Things due is the open occurrence's when there is one, else the template's next day.
+        let laterDue = laterSide(r.modified(.due), occurrences.first?.modified(.due) ?? t.modified(.due))
         var fp = plan.fingerprint
 
         if r.completed {
@@ -91,7 +92,7 @@ extension SyncPass {
                 let observed = observedThingsDue(t)
                 let thingsMoved = observed != nil && observed != base
                 var side: Side?
-                if reminderMoved && thingsMoved { side = later } else if reminderMoved { side = .reminders } else if thingsMoved { side = .things }
+                if reminderMoved && thingsMoved { side = laterDue } else if reminderMoved { side = .reminders } else if thingsMoved { side = .things }
                 switch side {
                 case .reminders:
                     if isAdvance(rule: r.recurrence ?? t.recurrence, base: base, to: rDue) {
@@ -128,7 +129,7 @@ extension SyncPass {
             if let baseRule = baseFP.rule {
                 if rRule.key != tRule.key {
                     let rChanged = rRule.key != baseRule.key, tChanged = tRule.key != baseRule.key
-                    let side: Side = rChanged && !tChanged ? .reminders : tChanged && !rChanged ? .things : later
+                    let side: Side = rChanged && !tChanged ? .reminders : tChanged && !rChanged ? .things : laterSide(.rule, r, t)
                     switch side {
                     case .reminders:
                         if ThingsRepeat.rr(for: rRule, start: rDue?.day ?? t.nextDay ?? "2026-01-01") != nil {
