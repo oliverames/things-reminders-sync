@@ -50,7 +50,13 @@ func taskMatches(_ task: ThingsTask, _ m: ListMapping, in snapshot: ThingsSnapsh
         if task.projectId == target { return true }
         if let h = task.headingId, let heading = snapshot.tasks[h], heading.projectId == target { return true }
         return false
-    case .area: return task.areaId == target && task.projectId == nil && task.headingId == nil
+    case .area:
+        if task.areaId == target && task.projectId == nil && task.headingId == nil { return true }
+        // `sectionsAsProjects`: a to-do in a project of the area can belong to the list too. Which of those
+        // projects mirror a section is the engine's call (`SyncPass.matches`).
+        guard m.sectionsAsProjects, let pid = task.projectId ?? task.headingId.flatMap({ snapshot.tasks[$0]?.projectId }),
+              let project = snapshot.tasks[pid] else { return false }
+        return project.kind == .project && !project.trashed && project.areaId == target
     case .tag: return task.tagIds.contains(target)
     case .heading: return task.headingId == target
     }
@@ -96,8 +102,8 @@ extension ThingsSnapshot {
 extension SyncConfig {
     /// Lists whose Reminders changes start a pass: enabled and not paused.
     var watchedListIds: [String] { mappings.filter { $0.enabled && !$0.paused }.map(\.id) }
-    /// Lists whose sections are read: live project-mode lists that mirror sections as headings.
-    var sectionListIds: [String] { mappings.filter { $0.isLive && $0.mode == .project && $0.syncSections }.map(\.id) }
+    /// Lists whose sections are read: live lists that mirror sections as headings or as projects of an area.
+    var sectionListIds: [String] { mappings.filter { $0.isLive && $0.mirrorsSections }.map(\.id) }
     var pausedListIds: Set<String> { Set(mappings.filter(\.paused).map(\.id)) }
 
     /// Ids a mapping currently needs: its target, and a heading mapping's project.

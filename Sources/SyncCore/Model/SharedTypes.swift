@@ -438,18 +438,21 @@ public struct ReminderPatch: Codable, Hashable, Sendable {
     public var addSubtasks: [String]?
     /// Sets the priority (`priority`, a plain RemCTL field).
     public var priority: ReminderPriority?
+    /// `.some(sharee)` assigns the reminder in a shared list (`--private --assign`: a sharee id, address, name or
+    /// "me"); `.some(nil)` clears the assignment (`--private --unassign`). RemCTL cannot read an assignment back.
+    public var assignee: String??
     public init(title: String? = nil, notes: String? = nil, due: DueDate?? = nil, completed: Bool? = nil,
                 completionDate: Date? = nil, listId: String? = nil, section: String?? = nil, recurrence: RepeatRule?? = nil,
                 url: String? = nil, flagged: Bool? = nil, tags: [String]? = nil, addSubtasks: [String]? = nil,
-                priority: ReminderPriority? = nil) {
-        self.priority = priority
+                priority: ReminderPriority? = nil, assignee: String?? = nil) {
+        self.priority = priority; self.assignee = assignee
         self.url = url; self.flagged = flagged; self.tags = tags; self.addSubtasks = addSubtasks
         self.title = title; self.notes = notes; self.due = due; self.completed = completed
         self.completionDate = completionDate; self.listId = listId; self.section = section; self.recurrence = recurrence
     }
     public var isEmpty: Bool {
         title == nil && notes == nil && due == nil && completed == nil && listId == nil && section == nil && recurrence == nil
-            && url == nil && flagged == nil && tags == nil && (addSubtasks?.isEmpty ?? true) && priority == nil
+            && url == nil && flagged == nil && tags == nil && (addSubtasks?.isEmpty ?? true) && priority == nil && assignee == nil
     }
 }
 
@@ -591,6 +594,11 @@ public struct ListMapping: Codable, Hashable, Sendable, Identifiable {
     public var canceledBecomes: CanceledOutcome
     /// When false, to-dos in Someday are kept out of Reminders.
     public var syncSomeday: Bool
+    /// Reminders sharee (id, address, name or "me") -> Things tag title. A linked to-do carrying one of the tags
+    /// assigns its reminder to that sharee. One way only: RemCTL cannot read an assignment. Empty for off.
+    public var assigneeTags: [String: String]
+    /// For `.area` mode: mirror each Reminders section as a Things project inside the area. Ignored in other modes.
+    public var sectionsAsProjects: Bool
 
     public init(id: String, listTitle: String, enabled: Bool = true, mode: MappingMode = .project,
                 targetId: String? = nil, targetTitle: String, projectAreaId: String? = nil, awaitingTarget: Bool = false,
@@ -598,7 +606,8 @@ public struct ListMapping: Codable, Hashable, Sendable, Identifiable {
                 paused: Bool = false, propagateDeletes: Bool? = nil, undatedArriveAs: UndatedArrival = .anytime,
                 alwaysTag: String? = nil, includeCompletedOnFirstLink: Bool? = nil, syncChecklists: Bool? = nil,
                 dueMapsTo: DueTarget = .when, eveningFromHour: Int? = nil, canceledBecomes: CanceledOutcome = .completed,
-                syncSomeday: Bool = true) {
+                syncSomeday: Bool = true, assigneeTags: [String: String] = [:], sectionsAsProjects: Bool = false) {
+        self.assigneeTags = assigneeTags; self.sectionsAsProjects = sectionsAsProjects
         self.dueMapsTo = dueMapsTo; self.eveningFromHour = eveningFromHour
         self.canceledBecomes = canceledBecomes; self.syncSomeday = syncSomeday
         self.id = id; self.listTitle = listTitle; self.enabled = enabled; self.mode = mode
@@ -612,7 +621,7 @@ public struct ListMapping: Codable, Hashable, Sendable, Identifiable {
     private enum CodingKeys: String, CodingKey {
         case id, listTitle, enabled, mode, targetId, targetTitle, projectAreaId, awaitingTarget, parentProjectId, syncSections
         case direction, paused, propagateDeletes, undatedArriveAs, alwaysTag, includeCompletedOnFirstLink, syncChecklists
-        case dueMapsTo, eveningFromHour, canceledBecomes, syncSomeday
+        case dueMapsTo, eveningFromHour, canceledBecomes, syncSomeday, assigneeTags, sectionsAsProjects
     }
 
     public init(from decoder: Decoder) throws {
@@ -638,6 +647,8 @@ public struct ListMapping: Codable, Hashable, Sendable, Identifiable {
         eveningFromHour = try c.decodeIfPresent(Int.self, forKey: .eveningFromHour)
         canceledBecomes = try c.decodeIfPresent(CanceledOutcome.self, forKey: .canceledBecomes) ?? .completed
         syncSomeday = try c.decodeIfPresent(Bool.self, forKey: .syncSomeday) ?? true
+        assigneeTags = try c.decodeIfPresent([String: String].self, forKey: .assigneeTags) ?? [:]
+        sectionsAsProjects = try c.decodeIfPresent(Bool.self, forKey: .sectionsAsProjects) ?? false
     }
 
     /// `eveningFromHour` as minutes after midnight; nil when unset or outside 0 to 23.
@@ -645,6 +656,11 @@ public struct ListMapping: Codable, Hashable, Sendable, Identifiable {
         guard let hour = eveningFromHour, (0...23).contains(hour) else { return nil }
         return hour * 60
     }
+
+    /// True when the list mirrors Reminders sections: as headings of its project, or (`sectionsAsProjects`) as
+    /// projects inside its area.
+    public var mirrorsSections: Bool { (mode == .project && syncSections) || sectionsAreProjects }
+    public var sectionsAreProjects: Bool { mode == .area && sectionsAsProjects }
 
     /// True when the list takes part in sync passes and polls: enabled, not paused, and with a target chosen.
     public var isLive: Bool { enabled && !paused && !awaitingTarget }

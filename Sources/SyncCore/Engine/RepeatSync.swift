@@ -97,7 +97,10 @@ extension SyncPass {
                 else if reminderMoved && thingsMoved { side = laterDue } else if reminderMoved { side = .reminders } else if thingsMoved { side = .things }
                 switch side {
                 case .reminders:
-                    if isAdvance(rule: r.recurrence ?? t.recurrence, base: base, to: rDue) {
+                    // A due change that comes with a new rule is a rule edit, never a completion, even when the new
+                    // date is the new rule's next occurrence: the open occurrence is moved, not finished.
+                    let ruleEdited = baseFP.rule.map { agreed in r.recurrence.map { $0.key != agreed.key } ?? false } ?? false
+                    if !ruleEdited, isAdvance(rule: r.recurrence ?? t.recurrence, base: base, to: rDue) {
                         // Completing in Reminders advanced the same reminder: finish the occurrence for the old day.
                         if let o = occurrences.first(where: { $0.startDate == base.day }) {
                             plan.occurrenceWrites.append((o.id, ThingsTodoPatch(completed: true)))

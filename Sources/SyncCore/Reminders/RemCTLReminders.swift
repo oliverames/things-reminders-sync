@@ -259,6 +259,10 @@ public actor RemCTLReminders: RemindersBackend {
             if tags.isEmpty { privateFields["clear_tags"] = true } else { privateFields["set_tags"] = .string(tags.joined(separator: ",")) }
         }
         if let subtasks = patch.addSubtasks, !subtasks.isEmpty { privateFields["subtasks"] = .array(subtasks.map { .string($0) }) }
+        // Assignment in a shared list (`--assign` / `--unassign`). No read shows it, so nothing is read back.
+        if let assignee = patch.assignee {
+            if let assignee { privateFields["assign"] = .string(assignee) } else { privateFields["unassign"] = true }
+        }
         if !privateFields.isEmpty {
             fields.merge(privateFields) { $1 }
             fields["private"] = true

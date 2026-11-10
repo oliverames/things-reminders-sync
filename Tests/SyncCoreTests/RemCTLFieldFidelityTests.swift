@@ -59,6 +59,18 @@ import Testing
         #expect(item.url == "https://example.com/a" && item.tags == ["Home", "Work"] && item.flagged && item.notes == "body")
     }
 
+    @Test func assignAndUnassignAreSentPrivately() async throws {
+        let fake = FakeRemCTL()
+        await fake.put(FakeRemCTL.row(5, "X"))
+        let backend = makeBackend(fake)
+        _ = try await backend.update(id: "5", patch: ReminderPatch(assignee: .some("ana@example.com")))
+        _ = try await backend.update(id: "5", patch: ReminderPatch(assignee: .some(nil)))
+        let calls = await fake.calls("update_reminder")
+        #expect(calls.count == 2)
+        #expect(calls[0]["private"] == true && calls[0]["assign"] == "ana@example.com" && calls[0]["unassign"] == nil)
+        #expect(calls[1]["private"] == true && calls[1]["unassign"] == true && calls[1]["assign"] == nil)
+    }
+
     /// Live on 2026-11-09, 5 of 7 tag writes read back stale right after the call although all had landed.
     @Test func aStaleReadAfterAPrivateWriteIsReread() async throws {
         let fake = FakeRemCTL()

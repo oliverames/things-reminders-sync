@@ -52,6 +52,12 @@ public struct Fingerprint: Codable, Hashable, Sendable {
     /// Whether the to-do was in Someday when last seen. Only a move seen from false to true removes the reminder of
     /// a list whose `syncSomeday` is off.
     public var thingsSomeday: Bool? = nil
+    /// The sharee the app last assigned the reminder to through `ListMapping.assigneeTags`; nil when it assigned
+    /// none or last cleared the assignment. Reminders cannot be read, so this is what the app wrote, not what is there.
+    public var assignee: String? = nil
+    /// Set when an assignment write failed: the to-do's tags and the wanted sharee at that moment. The write is
+    /// tried again only when either differs.
+    public var assigneeFailed: String? = nil
 
     public struct ChecklistEntry: Codable, Hashable, Sendable {
         public var title: String

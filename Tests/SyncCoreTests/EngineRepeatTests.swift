@@ -124,6 +124,24 @@ struct EngineRepeatTests {
         #expect(await w.reminders.completions.count == 1)
     }
 
+    /// Regression: a rule change whose new due date is the new rule's next occurrence was read as an advance and
+    /// completed the open occurrence. Monday weekly becomes Tuesday weekly, due moves from Mon 16 to Tue 17.
+    @Test func ruleAndDueChangedTogetherIsARuleEditNotACompletion() async throws {
+        var w = try await pairedWorld()
+        let rid = w.links.links[0].reminderId
+        let tuesday = RepeatRule(frequency: .weekly, weekdays: [2])
+        #expect(tuesday.nextOccurrence(after: "2026-11-16") == "2026-11-17", "the case under test: the new date is the new rule's next day")
+        await w.reminders.edit(rid) { $0.recurrence = tuesday; $0.due = DueDate(day: "2026-11-17") }
+        _ = try await w.sync()
+        let writes = await w.things.updates
+        #expect(!writes.contains { $0.1.completed == true }, "a rule edit never completes the open occurrence")
+        #expect(writes.contains { $0.0 == "OCC1" && $0.1.when == .some(DueDate(day: "2026-11-17")) }, "the open occurrence moves to the new day")
+        #expect(writes.contains { $0.0 == "TPL" && $0.1.recurrence == tuesday })
+        #expect(await w.things.task("OCC1")?.status == .open)
+        #expect(w.links.links[0].fingerprint.due?.day == "2026-11-17" && w.links.links[0].fingerprint.rule?.key == tuesday.key)
+        #expect(await w.reminders.completions.isEmpty)
+    }
+
     @Test func completingInRemindersCompletesTheOpenOccurrenceForTheOldDay() async throws {
         var w = try await pairedWorld()
         let rid = w.links.links[0].reminderId

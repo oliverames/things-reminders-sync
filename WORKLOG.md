@@ -1,5 +1,40 @@
 # Worklog
 
+## 2026-11-09: assignee tags, sections as projects, and the repeat rule-edit fix
+
+Engine work, no UI. Tests: `swift test --parallel`, 416 passing (was 399). Nothing was run against the real apps,
+RemCTL or Things Cloud, and nothing was committed. No new Things wire shape is written.
+
+- `assigneeTags` (per list, default `{}`): a mapped tag on a linked to-do assigns its reminder to the sharee;
+  removing the tag clears it. Things to Reminders only, because RemCTL cannot read an assignment. `ReminderPatch`
+  gained `assignee`; RemCTL writes `assign` or `unassign` with `private`. Two fingerprint fields (`assignee`,
+  `assigneeFailed`) keep later passes quiet and hold back a failed write until the tags change. Details:
+  `docs/SPEC.md`, "Assignee tags". Tests: `EngineAssigneeTests.swift`.
+- `sectionsAsProjects` (per list, default `false`, area mode): sections mirror projects inside the area on the
+  existing section code. `sectionsActive`, `thingsGroup` and `placement(forGroup:in:)` now cover both forms, and
+  `matches` decides which projects of the area belong to the list. Created projects go in the ledger as kind
+  `project` and the existing cleanup removes them when empty. Details: `docs/SPEC.md`, "Sections as projects".
+  Tests: `EngineSectionProjectsTests.swift`.
+- Fixed the defect noted under "Known and left alone" in the per-list preferences entry below: in `templateExtras` a due change that comes with a changed rule is a
+  rule edit, so the open occurrence is moved instead of completed. Regression test:
+  `ruleAndDueChangedTogetherIsARuleEditNotACompletion`, which fails without the fix.
+
+Decisions worth knowing:
+
+- "Key order" for two mapped tags is sorted key order. A JSON object has none, and the app saves `config.json`
+  with sorted keys.
+- A project of the area that matches no section is out of scope, but a linked to-do moved into it stays linked
+  and creates the section. From then on the project mirrors that section and its other to-dos sync too.
+- A project that another list targets is never used as a section project, so a section of the same name gets a
+  second project of that name in the area.
+- An empty Reminders section is invisible to the engine, so it does not make a project match.
+
+Known and left alone: a `.reminderRepeats` pair keeps no agreed rule in its fingerprint, so a rule and date
+changed together can still read as an advance there. An assignment whose write ended uncertain counts as failed.
+
+Not verified: `assign` and `unassign` against a real RemCTL and a shared list (the argument names come from
+RemCTL's published tool schema), and the project moves against the real Things apps.
+
 ## 2026-11-09: six optional native field mappings in the engine
 
 Engine and client work, no UI. Tests: `swift test --parallel`, 399 passing (was 361). Nothing was run against the

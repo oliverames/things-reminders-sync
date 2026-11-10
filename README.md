@@ -68,7 +68,7 @@ The icon is a to-do checkbox with a badge that tells you what sync is doing. Fro
 | Mode | A Reminders list becomes | Good for |
 |---|---|---|
 | **Project** | A Things project, and Reminders sections can mirror its headings | A list with an end, like a renovation |
-| **Area** | A Things area | An ongoing list, like Personal or Family |
+| **Area** | A Things area, and Reminders sections can mirror projects inside it (`sectionsAsProjects`) | An ongoing list, like Personal or Family |
 | **Tag** | Every to-do carrying a Things tag, wherever it's filed | A person or a context |
 | **Heading** | One heading inside a Things project | Several small lists that belong in one project |
 
@@ -90,7 +90,7 @@ You can change a list's mode or target later. The app moves the items it linked 
 | Subtasks | Checklist items | Both ways: adding, renaming, completing or removing one changes the other. Set `syncChecklists` to `false` in `config.json` to stop writing checklists in Things. |
 | Section | Heading | In project mode. |
 
-Fields that only one app has stay put and are never cleared. That covers priority (unless you set `priorityTag`), urgent, early reminders, location alarms, images and assignees in Reminders, and deadlines (unless a list maps the due date to them) and This Evening in Things. Every update carries only the fields that changed. A due date change leaves a reminder's other alerts alone, and a new time on the same day leaves a to-do in This Evening. Moving a to-do to another day takes it out of This Evening, because This Evening belongs to today.
+Fields that only one app has stay put and are never cleared. That covers priority (unless you set `priorityTag`), urgent, early reminders, location alarms, images and assignees (unless a list sets `assigneeTags`) in Reminders, and deadlines (unless a list maps the due date to them) and This Evening in Things. Every update carries only the fields that changed. A due date change leaves a reminder's other alerts alone, and a new time on the same day leaves a to-do in This Evening. Moving a to-do to another day takes it out of This Evening, because This Evening belongs to today.
 
 A reminder that is due all day and has an alert on that day shows a time in Reminders, so it syncs as due at that time.
 
@@ -100,7 +100,7 @@ When a list is first turned on and an item has different notes on each side, the
 
 ### Repeating items
 
-A repeating reminder pairs with a Things repeating to-do, and the rule syncs both ways. Complete it in either app and the other one moves on to the next date. Things creates the copies of a repeating to-do itself, so the app never makes them for it.
+A repeating reminder pairs with a Things repeating to-do, and the rule syncs both ways. Complete it in either app and the other one moves on to the next date. Changing a reminder's rule and its date together is a rule edit, never a completion. Things creates the copies of a repeating to-do itself, so the app never makes them for it.
 
 You can add a repeat to an item that is already synced. Add it in Things and the reminder gets the same rule. Add it in Reminders and the Things to-do stands for the current occurrence; when you complete it, Things gets a repeating to-do for the rule. A new time for a repeating reminder is written to the Things repeating to-do as well, so later occurrences keep it.
 
@@ -149,6 +149,8 @@ Each list can also carry its own settings. Settings has no controls for them yet
 | `eveningFromHour` | none | An hour from 0 to 23. A reminder due today at or after that hour arrives in This Evening, and a linked to-do moves there when its reminder's due date changes to this evening. The app does this once per due date, so a to-do you move back to Today stays there. Nothing changes from Things to Reminders, and a date you set in Things is left where you put it. Ignored when `dueMapsTo` is `deadline`. |
 | `canceledBecomes` | `completed` | `deleted` deletes the reminder when you cancel its to-do in Things, instead of completing it. It counts as a deletion: it respects `propagateDeletes` and the deletion safety limit, and a list that is one-way from Reminders ignores it. A to-do you only complete still completes the reminder. |
 | `syncSomeday` | `true` | `false` keeps Someday out of Reminders. A to-do in Someday gets no reminder. A linked to-do you move to Someday has its reminder deleted (again respecting `propagateDeletes` and the safety limit), and when it leaves Someday the reminder is made again. A reminder is still copied to Things as before, including one that arrives in Someday. |
+| `assigneeTags` | `{}` | Maps people a shared list is shared with to Things tags, for example `{"ana@example.com": "Ana", "me": "Mine"}`. The key is a sharee id, address, name or `me`; the value is a Things tag title. Give a linked to-do one of the tags and its reminder is assigned to that person. Remove the tag and the assignment is cleared. This works from Things to Reminders only: RemCTL cannot read who a reminder is assigned to, so an assignment you make in Reminders is never seen and never changes Things. If a to-do carries two of the tags, the first key in alphabetical order wins. If the write fails (the list is not shared, say), the app logs a warning and tries again only when the to-do's tags change. The tags still sync as ordinary tags. |
+| `sectionsAsProjects` | `false` | Area lists only. `true` mirrors each Reminders section as a Things project inside the area. A reminder in a section lives in the project of that name, and one with no section sits loose in the area. Move a reminder to another section and its to-do moves to that project. Move a to-do into another project of the area and its reminder moves to that section. The app creates a missing project or section and removes one it created once it is empty. Projects of yours in the area that match no section are left alone and their to-dos are not synced. RemCTL cannot take a reminder out of a section, so a to-do you move out of every project keeps its reminder's section in Reminders. |
 
 ### More options
 

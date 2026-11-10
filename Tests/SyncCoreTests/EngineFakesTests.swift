@@ -194,6 +194,11 @@ actor FakeReminders: RemindersBackend {
     /// Like RemCTL 2.5.0, a section cannot be removed: `.some(nil)` is a no-op.
     var clearsSections = false
     var groceryLists: Set<String> = []
+    /// Assignment is write-only, as with RemCTL: the engine never reads it. Failed attempts are counted apart.
+    private(set) var assignWrites: [(id: String, sharee: String?)] = []
+    private(set) var assignAttempts = 0
+    var assignFails = false
+    func setAssignFails(_ v: Bool) { assignFails = v }
     private(set) var sectionWrites: [(id: String, section: String)] = []
     /// Sections that exist per list, so a write with an unknown name creates one (and reports it) like RemCTL.
     var sectionNames: [String: Set<String>] = [:]
@@ -262,6 +267,11 @@ actor FakeReminders: RemindersBackend {
             }
         }
         guard var r = items[id] else { throw NSError(domain: "fake", code: 1) }
+        if let a = p.assignee {
+            assignAttempts += 1
+            if assignFails { throw NSError(domain: "fake", code: 2, userInfo: [NSLocalizedDescriptionKey: "list is not shared"]) }
+            assignWrites.append((id, a))
+        }
         if let u = p.url, !ignoresURL { r.url = u }
         if let f = p.flagged, !ignoresFlag { r.flagged = f }
         if let pr = p.priority { r.priority = pr }

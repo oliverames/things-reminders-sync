@@ -119,6 +119,9 @@ final class SyncPass {
     var activeById: [String: ListMapping] = [:]
     var activeOrder: [ListMapping] = []
     var thingsScope: [String: String] = [:]
+    /// `sectionsAsProjects`: per list, the keys of the sections its reminders are in or the app created, and the
+    /// to-dos linked through it. Filled on first use (`mirrorState`).
+    var mirrorCache: [String: (sections: Set<String>, linked: Set<String>)] = [:]
     var pendingDeletes: [String: [(linkId: UUID, action: PendingDelete, title: String)]] = [:]
     var removedLinks: Set<UUID> = []
     var failedMappings: Set<String> = []
@@ -347,7 +350,13 @@ final class SyncPass {
                         } else {
                             patch.placement = .project(target)
                         }
-                    case .area: patch.placement = .area(target)
+                    case .area:
+                        // Keep the to-do in a same-named project when the new area mirrors sections as projects.
+                        if m.sectionsAreProjects, let group = thingsGroup(task, oldMapping) {
+                            patch.placement = try await placement(forGroup: group, in: m)
+                        } else {
+                            patch.placement = .area(target)
+                        }
                     case .tag: patch.addTagIds = [target]
                     case .heading: patch.placement = .heading(target)
                     }
@@ -358,7 +367,10 @@ final class SyncPass {
                     switch m.mode {
                     case .project: task.projectId = target; task.areaId = nil; task.headingId = newHeading
                     case .heading: task.headingId = target; task.projectId = nil; task.areaId = nil
-                    case .area: task.areaId = target; task.projectId = nil; task.headingId = nil
+                    case .area:
+                        task.headingId = nil
+                        if case .project(let section)? = patch.placement { task.projectId = section; task.areaId = nil }
+                        else { task.areaId = target; task.projectId = nil }
                     case .tag: if !task.tagIds.contains(target) { task.tagIds.append(target) }
                     }
                     if let removed = patch.removeTagIds { task.tagIds.removeAll { removed.contains($0) } }
@@ -408,15 +420,66 @@ final class SyncPass {
         }
     }
 
-    func matches(_ task: ThingsTask, _ m: ListMapping) -> Bool { taskMatches(task, m, in: snapshot) }
+    func matches(_ task: ThingsTask, _ m: ListMapping) -> Bool {
+        guard taskMatches(task, m, in: snapshot) else { return false }
+        // `sectionsAsProjects`: a to-do loose in the area always belongs to the list. One in a project of the area
+        // belongs when the project mirrors a section (a reminder of the list is in a section of that name, or the app
+        // created the section or the project) or when the to-do is already linked through the list. Other projects
+        // of the area are the user's own and are left alone.
+        guard m.sectionsAreProjects, task.projectId != nil || task.headingId != nil else { return true }
+        guard let project = areaProject(of: task, m) else { return false }
+        let state = mirrorState(m)
+        if state.linked.contains(task.id) { return true }
+        if store.ownedThings.contains(where: { $0.id == project.id && $0.kind == .project && $0.mappingId == m.id }) { return true }
+        return Fingerprint.groupKey(project.title).map(state.sections.contains) ?? false
+    }
 
-    // MARK: Groups (Reminders sections <-> Things headings)
+    func mirrorState(_ m: ListMapping) -> (sections: Set<String>, linked: Set<String>) {
+        if let cached = mirrorCache[m.id] { return cached }
+        var sections = Set(remindersById.values.filter { $0.listId == m.id }.compactMap { Fingerprint.groupKey($0.section) })
+        sections.formUnion(store.ownedSections.filter { $0.listId == m.id }.compactMap { Fingerprint.groupKey($0.name) })
+        let state = (sections, Set(store.links.filter { $0.mappingId == m.id }.map(\.thingsId)))
+        mirrorCache[m.id] = state
+        return state
+    }
 
-    func sectionsActive(_ m: ListMapping) -> Bool { m.mode == .project && m.syncSections }
+    /// `sectionsAsProjects`: the project of the mapping's area a to-do is in (directly or under one of its headings).
+    /// Never a project some list targets, which syncs through that list.
+    func areaProject(of task: ThingsTask, _ m: ListMapping) -> ThingsTask? {
+        guard m.sectionsAreProjects, let target = m.targetId,
+              let pid = task.projectId ?? task.headingId.flatMap({ snapshot.tasks[$0]?.projectId }),
+              let project = snapshot.tasks[pid], project.kind == .project, !project.trashed, project.areaId == target,
+              !config.targetIds().contains(pid) else { return nil }
+        return project
+    }
+
+    /// The existing open project titled `title` in the area (case-insensitive, oldest first when duplicated), or a
+    /// new one, recorded in the ownership ledger so it is removed again once it is empty.
+    func project(titled title: String, inArea area: String, mapping m: ListMapping) async throws -> String {
+        guard let clean = Fingerprint.cleanGroup(title) else { throw ThingsCloudError.invalidChange(["empty project title"]) }
+        let key = clean.lowercased()
+        let taken = config.targetIds()
+        let hits = snapshot.tasks.values
+            .filter { $0.kind == .project && !$0.trashed && $0.status == .open && $0.areaId == area && !taken.contains($0.id)
+                && Fingerprint.groupKey($0.title) == key }
+            .sorted { ($0.creationDate ?? .distantPast, $0.id) < ($1.creationDate ?? .distantPast, $1.id) }
+        if let existing = hits.first { return existing.id }
+        let id = try await things.createProject(title: clean, areaId: area)
+        snapshot.tasks[id] = ThingsTask(id: id, kind: .project, title: clean, areaId: area)
+        store.ownedThings.append(OwnedThingsContainer(id: id, kind: .project, mappingId: m.id, title: clean))
+        log(.change, "Created Things project \"\(clean)\" in \"\(snapshot.areas[area]?.title ?? "area")\" for the section of that name")
+        return id
+    }
+
+    // MARK: Groups (Reminders sections <-> Things headings, or projects of an area)
+
+    func sectionsActive(_ m: ListMapping) -> Bool { m.mirrorsSections }
 
     /// The title of the heading a to-do sits under in the mapping's project, or nil when it is directly in the
-    /// project (or its heading is trashed or belongs to another project).
+    /// project (or its heading is trashed or belongs to another project). With `sectionsAsProjects`: the title of
+    /// the project of the area the to-do is in, or nil when it is loose in the area.
     func thingsGroup(_ task: ThingsTask, _ m: ListMapping) -> String? {
+        if m.sectionsAreProjects { return Fingerprint.cleanGroup(areaProject(of: task, m)?.title) }
         guard sectionsActive(m), let target = m.targetId, let h = task.headingId, let heading = snapshot.tasks[h],
               heading.kind == .heading, !heading.trashed, heading.projectId == target else { return nil }
         return Fingerprint.cleanGroup(heading.title)
@@ -440,6 +503,10 @@ final class SyncPass {
 
     func placement(forGroup group: String?, in m: ListMapping) async throws -> ThingsPlacement {
         guard let target = m.targetId else { throw ThingsCloudError.notFound("target of \(m.listTitle)") }
+        if m.sectionsAreProjects {
+            guard let group else { return .area(target) }
+            return .project(try await project(titled: group, inArea: target, mapping: m))
+        }
         guard let group else { return .project(target) }
         return .heading(try await heading(titled: group, in: target, mappingId: m.id))
     }
@@ -766,6 +833,8 @@ final class SyncPass {
             for field in plan.conflicts {
                 log(.warning, "Conflict on \"\(plan.fingerprint.title)\" (\(field)); the newer edit won")
             }
+            await syncAssignee(base: link.fingerprint, fingerprint: &plan.fingerprint, reminderId: updated.reminderId,
+                               reminder: actualReminder ?? reminder, task: task, mapping: destination ?? activeById[home])
             updated.fingerprint = plan.fingerprint
             updated.mappingId = newMapping
             updated.lastSynced = Date()
@@ -1247,8 +1316,9 @@ final class SyncPass {
             let reminderTags = config.createMissingTags ? Set(remindersById.values.flatMap(\.tags).map(TagEnvironment.key)) : []
             for entry in store.ownedThings where !paused.contains(entry.mappingId) {   // a paused list is left alone
                 if entry.kind == .tag, reminderTags.contains(TagEnvironment.key(entry.title)) { continue }
+                let sectionProject = entry.kind == .project && (activeById[entry.mappingId]?.sectionsAreProjects ?? false)
                 await removeOwnedIfEmpty(entry.kind, id: entry.id,
-                                         why: entry.kind == .heading ? "it held no to-dos" : "no list syncs to it and it is empty")
+                                         why: entry.kind == .heading || sectionProject ? "it held no to-dos" : "no list syncs to it and it is empty")
             }
         }
         let known = Set(lists.map(\.id))

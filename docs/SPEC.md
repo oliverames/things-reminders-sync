@@ -360,6 +360,29 @@ day that is not a repeating template.
 - Never for a title that `alwaysTag`, `flaggedTagTitle` or `priorityTag` names, and never for a title with a
   comma (RemCTL cannot write one back).
 
+## Assignee tags
+
+`assigneeTags` (per list): a JSON object from a Reminders sharee to a Things tag title, empty by default (off).
+Code: `AssigneeSync.swift`, `RemCTLReminders.update`. Tests: `EngineAssigneeTests.swift`,
+`RemCTLFieldFidelityTests.swift`.
+
+- One way only, Things to Reminders. RemCTL shows no assignee in any read (export, show and info rows have no such
+  field), so an assignment made in Reminders is never seen and never changes Things.
+- The write is `update_reminder` with `private: true` and `assign: <sharee>` (a sharee id, address, name or `me`)
+  or `unassign: true`, RemCTL's `edit --private --assign` and `--unassign`. It only works in a shared list.
+- When a linked, open to-do carries a mapped tag (titles compare without case), the reminder is assigned to that
+  sharee. When no mapped tag is left, the assignment the app wrote is cleared. An assignment the app never wrote
+  is never cleared.
+- The fingerprint keeps the last value written (`assignee`), so later passes write nothing. A to-do with two
+  mapped tags uses the first key in sorted order (a JSON object has no order of its own, and `config.json` is
+  saved with sorted keys) and logs once, when the assignment is written.
+- A failed write logs a warning and does not fail the pair. The fingerprint keeps the to-do's tags and the wanted
+  sharee at that moment (`assigneeFailed`), and the write is tried again only when either changes.
+- The write is its own `update` call after the pair's other writes, so a refused assignment cannot block them.
+- The tags are ordinary tags for tag sync. Nothing is written in a list that is one way from Reminders.
+- The assignment follows the to-do's tags as read at the start of the pass, so a tag that arrives from Reminders
+  in a pass assigns on the next one.
+
 ## Field mapping
 
 | Reminders | Things |
@@ -463,7 +486,10 @@ validator are in docs/RECURRENCE.md; code in `Engine/RepeatSync.swift`.
 
 - Completing the occurrence in Things completes the reminder without a date, so it advances itself.
   A reminder whose due moves to the rule's next occurrence (same time of day) is an advance: the open
-  occurrence for the old day is completed. Any other due change is a reschedule.
+  occurrence for the old day is completed. Any other due change is a reschedule. A due change that arrives with a
+  new rule (the reminder's rule differs from the agreed `rule` in the fingerprint) is a rule edit and never an
+  advance, even when the new date is the new rule's next occurrence: the open occurrence is moved to the new date
+  and the rule is copied. A `.reminderRepeats` pair keeps no agreed rule, so it cannot tell the two apart.
 - Rule edits copy the changed side's rule; both changed means the later edit of the rule wins. A due both sides moved goes
   to the later move (the open occurrence's time on the Things side, else the template's). A counted end
   (`rc`/`count`) is masked when comparing, because Reminders decrements it on each completion.
@@ -527,7 +553,31 @@ groups go to Things. With `syncSections` off, groups are ignored and nothing mov
   not copied back, and to-dos created there get no section.
 
 Things deadline and attachments, and Reminders priority, alarms, location, images and assignee, are not synced and are never
-cleared.
+cleared (the assignee is written, never read, when a list sets `assigneeTags`; see "Assignee tags").
+
+#### Sections as projects (`sectionsAsProjects`)
+
+Per list, `false` by default, `area` mode only (ignored in other modes). The same machinery with a project of the
+area in place of a heading; `ListMapping.mirrorsSections` is true for both forms. Code: `SyncEngine.swift`
+(`matches`, `areaProject`, `project(titled:inArea:mapping:)`, `thingsGroup`, `placement(forGroup:in:)`),
+`Ledger.swift` (`taskMatches`). Tests: `EngineSectionProjectsTests.swift`.
+
+- The to-do's group is the title of the project it is in (directly or under one of that project's headings) when
+  the project is in the target area, not trashed, and not the target of any list. Loose in the area means no group.
+- A group resolves to the oldest open project of that title in the area (case-insensitive), else a new project
+  created with the existing `createProject(title:areaId:)` and recorded in the ownership ledger (kind `project`,
+  the list's id). No group resolves to the area itself. No new Things shape is written.
+- An app-created project that holds no to-dos is trashed by the end-of-pass cleanup like an app-created heading.
+  Projects the user made are never recorded and never removed.
+- Scope. A to-do loose in the area always belongs to the list. A to-do in a project of the area belongs when the
+  project mirrors a section (some reminder of the list is in a section of that name, or the app created the
+  section or the project), or when the to-do is already linked through the list. Other projects of the area are
+  left alone and their to-dos are not synced. A linked to-do moved into such a project stays linked, and its
+  reminder takes a section named like the project (created if missing), which makes the project a mirrored one.
+- An empty Reminders section cannot be seen (sections are read from the reminders in them), so a project matches
+  only a section that holds a reminder or that the app created.
+- A to-do moved out of every project asks for no section; RemCTL cannot clear one, so `stuckSection` applies as above.
+- A list retargeted to an area with the option on keeps each linked to-do in the project named like its old group.
 
 ## Link state and conflict rules
 
