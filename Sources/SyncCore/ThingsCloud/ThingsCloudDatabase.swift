@@ -17,6 +17,8 @@ struct ThingsDatabase: Sendable {
     struct ChecklistRow: Sendable { var taskId: String?; var item: ThingsChecklistItem }
     var checklistItems: [String: ChecklistRow] = [:]
     var latestServerIndex = 0
+    /// Templates removed by a tombstone, with the `tir` day each had (see `ThingsSnapshot.removedTemplates`).
+    var removedTemplates: [String: String] = [:]
 
     var snapshot: ThingsSnapshot {
         var byTask: [String: [ThingsChecklistItem]] = [:]
@@ -25,7 +27,7 @@ struct ThingsDatabase: Sendable {
             var task = row.task
             if let items = byTask[task.id] { task.checklist = items.sorted { ($0.index, $0.id) < ($1.index, $1.id) } }
             return task
-        }, areas: areas, tags: tags)
+        }, areas: areas, tags: tags, removedTemplates: removedTemplates)
     }
 
     /// Applies one history item. Returns the task ids it touched.
@@ -34,7 +36,10 @@ struct ThingsDatabase: Sendable {
         var touched = Set<String>()
         for (id, change) in map {
             if change.t == 2 {
-                if tasks.removeValue(forKey: id) != nil { touched.insert(id) }
+                if let gone = tasks.removeValue(forKey: id) {
+                    touched.insert(id)
+                    if gone.hasRule, let day = gone.task.nextDay { removedTemplates[id] = day }
+                }
                 if let parent = checklistItems[id]?.taskId { touched.insert(parent) }   // a removed checklist item changes its to-do
                 areas.removeValue(forKey: id)
                 tags.removeValue(forKey: id)

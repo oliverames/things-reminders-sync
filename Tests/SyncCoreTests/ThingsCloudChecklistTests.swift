@@ -70,8 +70,8 @@ import Testing
         try await client.updateTodo(id: task, patch: ThingsTodoPatch(checklist: [.rename(id: a, title: "Renamed")]))
         #expect(try cloud.commitBody(0)[a]?["p"]?["tt"] == "Renamed")
         try await client.updateTodo(id: task, patch: ThingsTodoPatch(checklist: [.setCompleted(id: a, completed: false)]))
-        let p = try #require(try cloud.commitBody(1)[a]?["p"]?.object)
-        #expect(p["ss"] == 0 && p["sp"] == .null)
+        // Key for key what Things 3.24.2 wrote for reopening a completed item (docs/SPEC.md); `md` is the client's clock.
+        #expect(try cloud.commitBody(1)[a] == ["t": 1, "e": "ChecklistItem3", "p": ["md": 1_794_186_000, "sp": nil, "ss": 0]])
         // And the local database reflects both.
         let item = try await client.refresh().snapshot.tasks[task]?.checklist.first
         #expect(item?.title == "Renamed" && item?.completed == false)

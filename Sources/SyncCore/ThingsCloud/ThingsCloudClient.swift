@@ -206,7 +206,7 @@ public actor ThingsCloudClient: ThingsBackend {
 
     /// The commit entries for checklist changes of a to-do. Ids of items to rename, complete or delete must exist.
     /// Create, complete (`ss` 3 + `sp` + `md`), rename (`tt` + `md`) and delete (`t` 2, empty `p`) match what Things 3.24.2
-    /// wrote when sampled (docs/SPEC.md). Reopening (`ss` 0, `sp` null) mirrors the create shape and is unsampled.
+    /// wrote when sampled (docs/SPEC.md), and so does reopening (`ss` 0 + `sp` null + `md`).
     private func checklistWrites(taskId: String, _ changes: [ThingsChecklistChange], existing: [ThingsChecklistItem]) throws -> ThingsChangeMap {
         var map: ThingsChangeMap = [:]
         var next = (existing.map(\.index).max() ?? -1) + 1
@@ -318,9 +318,15 @@ public actor ThingsCloudClient: ThingsBackend {
                 throw ThingsCloudError.invalidChange(["to-do \(id) is not a repeating template"])
             }
             if let rule = patch.recurrence {
+                // As Things 3.24.2 wrote a rule edit (docs/RECURRENCE.md): `sr` stays the old rule's, `ia` becomes the
+                // template's current next day (`tir`), and nothing but `md` and `rr` is written. An edit that also moves
+                // the next day (`templateNext`) was not sampled; there the old `ia` is kept, which is this app's own choice.
                 let o = row.rawRule?.object
                 var anchors: (ia: Double, sr: Double)?
-                if o?["tp"]?.int == 0, let ia = o?["ia"]?.double, let sr = o?["sr"]?.double { anchors = (ia, sr) }
+                if o?["tp"]?.int == 0, let ia = o?["ia"]?.double, let sr = o?["sr"]?.double {
+                    let tir = patch.templateNext == nil ? row.task.nextDay.flatMap { try? ThingsDates.timestamp(forDay: $0) } : nil
+                    anchors = (tir ?? ia, sr)
+                }
                 let start = row.task.nextDay ?? current.startDate ?? today()
                 guard let rr = ThingsRepeat.rr(for: rule, start: start, anchors: anchors) else {
                     throw ThingsCloudError.invalidChange(["the repeat rule has no verified Things shape"])
@@ -347,6 +353,34 @@ public actor ThingsCloudClient: ThingsBackend {
             map.merge(try checklistWrites(taskId: id, changes, existing: existingChecklist)) { $1 }
         }
         return map
+    }
+
+    public func stopRepeating(templateId id: String) async throws -> String {
+        try await withLock {
+            // The open occurrences are read from the database, so it has to be current.
+            try await pull()
+            let newId = ThingsID.generate()
+            do {
+                try await commit(try stopChanges(id: id, newId: newId), retryStale: false)
+            } catch ThingsCloudError.http(let status, _) where status == 409 || status == 412 {
+                // Another client committed in between (Things may just have made an occurrence): build it again.
+                try await pull()
+                try await commit(try stopChanges(id: id, newId: newId))
+            }
+            return newId
+        }
+    }
+
+    private func stopChanges(id: String, newId: String) throws -> ThingsChangeMap {
+        guard let db = database, let row = db.tasks[id], row.hasRule, !row.task.trashed else {
+            throw ThingsCloudError.notFound("repeating to-do \(id)")
+        }
+        var open: [String] = []
+        for (oid, o) in db.tasks where o.task.templateId == id && o.task.kind == .todo && o.task.status == .open && !o.task.trashed {
+            open.append(oid)
+        }
+        return try ThingsChanges.stopRepeating(templateId: id, template: row.task, tags: row.task.tagIds.filter { db.tags[$0] != nil },
+                                               openOccurrences: open, newId: newId, now: now())
     }
 
     public func createProject(title: String, areaId: String?) async throws -> String {

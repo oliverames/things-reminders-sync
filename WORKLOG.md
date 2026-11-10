@@ -1,5 +1,27 @@
 # Worklog
 
+## 2026-11-09: repeat edits brought in line with new Things samples
+
+Things 3.24.2 was sampled for a checklist reopen, a to-do made repeating, a rule edit, pause and resume, and Stop
+(history indexes 1688 to 1700). All samples are in `docs/RECURRENCE.md`; the reopen is in `docs/SPEC.md`.
+Tests: `swift test --parallel`, 319 passing. Nothing was run against the real apps.
+
+- Rule edit: the rewritten `rr` now takes `ia` from the template's `tir` and keeps the old `sr`, as sampled. It
+  used to keep the old `ia`. A rule edit that also moves the next day keeps the old `ia` (not sampled).
+- Repeat removed in Reminders: the pair used to be unlinked and the template kept repeating. The client now has
+  `stopRepeating`, which sends the sampled Stop commit, and the engine moves the link to a plain to-do.
+- Which to-do (follow-up): with one open occurrence the link moves to that occurrence and the new next-day to-do is
+  trashed with the ordinary trash update, so Things no longer shows two to-dos of the same title on one day. With
+  none, the link moves to the new to-do as before. With several, the occurrence on the reminder's due day is linked
+  when exactly one matches, otherwise the earliest; the rest stay unlinked and get their own reminders on the next
+  pass. A failed trash write is reported and the extra to-do is kept out of Reminders. See `docs/RECURRENCE.md`.
+- Stop in Things: a tombstoned template used to delete the reminder. The database now remembers the `tir` of a
+  tombstoned template, and the engine clears the reminder's repeat and links it to the plain to-do Things made.
+- Pause: read as an ordinary update, so the pair stays. Checklist reopen already matched the sample.
+- The validator needed no change. The app still writes `Task6` where Things 3.24 writes `Task7`.
+- Not sampled, so not copied in the Stop commit: a reminder time (`ato`) and checklist items. Notes and tags are
+  copied from the template, which the sample neither confirms nor contradicts (its template had none).
+
 ## 2026-11-09: per-field conflict resolution (audit finding M8)
 
 A field both sides changed now goes to the side that changed that field later, instead of comparing one time

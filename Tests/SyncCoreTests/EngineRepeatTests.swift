@@ -373,15 +373,201 @@ struct EngineRepeatTests {
         #expect(w.links.links.first?.repeatMode == nil)
     }
 
-    @Test func aReminderThatStopsRepeatingIsUnlinkedAndLeftAlone() async throws {
-        var w = try await pairedWorld()
+    /// A synced template pair as Things holds one: an open occurrence on Mon 2026-11-16 and the next day on 2026-11-23.
+    private func stoppablePair() async throws -> World {
+        var w = await world()
+        await w.things.add(template(next: "2026-11-23", created: 1))
+        await w.things.add(occurrence("OCC1", day: "2026-11-16"))
+        try await w.sync()
+        #expect(w.links.links.count == 1 && w.links.links[0].repeatMode == .template)
+        await w.things.clearRecords()
+        return w
+    }
+
+    @Test func aReminderThatStopsRepeatingIsLinkedToTheOneOpenOccurrence() async throws {
+        var w = try await stoppablePair()
         let rid = w.links.links[0].reminderId
+        #expect(await w.reminders.item(rid)?.due == DueDate(day: "2026-11-16"))
         await w.reminders.edit(rid) { $0.isRepeating = false; $0.recurrence = nil }
         let r = try await w.sync()
+        #expect(r.failures == 0 && r.unlinked == 0 && r.deletedInThings == 0 && r.createdInReminders == 0)
+        #expect(await w.things.stops == ["TPL"])
+        // The link is on the occurrence the Stop commit detached, not on the to-do it made for the next day.
+        let link = try #require(w.links.links.first)
+        #expect(w.links.links.count == 1 && link.reminderId == rid && link.thingsId == "OCC1")
+        #expect(link.repeatMode == nil && link.fingerprint.rule == nil && link.fingerprint.due == DueDate(day: "2026-11-16"))
+        #expect(await w.things.task("TPL") == nil)
+        let kept = try #require(await w.things.task("OCC1"))
+        #expect(!kept.isRepeating && !kept.isOccurrence && !kept.trashed && kept.startDate == "2026-11-16")
+        // The only other write is the trash of that next-day to-do: Things shows the item once.
+        let writes = await w.things.updates
+        #expect(writes.count == 1 && writes[0].0 != "OCC1" && writes[0].1 == ThingsTodoPatch(trashed: true))
+        let extra = try #require(await w.things.task(writes[0].0))
+        #expect(extra.trashed && extra.startDate == "2026-11-23")
+        #expect(await w.things.all().filter { !$0.trashed }.map(\.id) == ["OCC1"])
+        #expect(await w.reminders.item(rid)?.due == DueDate(day: "2026-11-16"))
+        // Neither the trashed to-do nor anything else comes back as a second reminder.
+        await w.things.clearRecords()
+        #expect(try await w.sync().changeCount == 0)
+        #expect(await w.reminders.all(in: "L1").count == 1 && w.links.links.count == 1)
+        // From here on it is an ordinary pair.
+        await w.reminders.edit(rid) { $0.completed = true; $0.completionDate = Date() }
+        try await w.sync()
+        #expect(await w.things.task("OCC1")?.status == .completed)
+    }
+
+    @Test func theReminderFieldsReachTheKeptOccurrence() async throws {
+        var w = try await stoppablePair()
+        let rid = w.links.links[0].reminderId
+        await w.reminders.edit(rid) { $0.isRepeating = false; $0.recurrence = nil; $0.due = DueDate(day: "2026-11-18") }
+        let r = try await w.sync()
+        #expect(r.failures == 0 && w.links.links.first?.thingsId == "OCC1")
+        #expect(await w.things.task("OCC1")?.startDate == "2026-11-18")
+        #expect(await w.reminders.item(rid)?.due == DueDate(day: "2026-11-18"))
+        #expect(await w.things.all().filter { !$0.trashed }.count == 1)
+    }
+
+    @Test func aReminderThatStopsRepeatingWithNoOpenOccurrenceIsLinkedToTheNewToDo() async throws {
+        var w = try await stoppablePair()
+        let rid = w.links.links[0].reminderId
+        await w.things.edit("OCC1") { $0.status = .completed; $0.stopDate = Date() }
+        try await w.sync()
+        await w.things.clearRecords()
+        let due = try #require(await w.reminders.item(rid)?.due)
+        await w.reminders.edit(rid) { $0.isRepeating = false; $0.recurrence = nil }
+        let r = try await w.sync()
+        #expect(r.failures == 0 && r.unlinked == 0 && r.createdInReminders == 0)
+        #expect(await w.things.stops == ["TPL"])
+        let link = try #require(w.links.links.first { $0.reminderId == rid })
+        #expect(link.thingsId != "TPL" && link.thingsId != "OCC1" && link.repeatMode == nil && link.fingerprint.rule == nil)
+        let plain = try #require(await w.things.task(link.thingsId))
+        #expect(!plain.isRepeating && !plain.trashed && plain.title == "Water plants" && plain.projectId == "P1")
+        #expect(plain.startDate == due.day && link.fingerprint.due == due)
+        // Nothing is trashed: the new to-do is the only open one.
+        let writes = await w.things.updates
+        #expect(writes.allSatisfy { $0.0 == link.thingsId && $0.1.trashed == nil })
+        #expect(await w.things.all().filter { !$0.trashed && $0.status == .open }.map(\.id) == [link.thingsId])
+        await w.things.clearRecords()
+        #expect(try await w.sync().changeCount == 0)
+        #expect(await w.reminders.all(in: "L1").count == 1)
+    }
+
+    /// A pair whose template has two open occurrences (Mon 2026-11-09 was never done) and its next day on 2026-11-23.
+    private func pairWithTwoOccurrences(due: String) async throws -> (World, String) {
+        var w = try await stoppablePair()
+        await w.things.add(occurrence("OCC0", day: "2026-11-09"))
+        let rid = w.links.links[0].reminderId
+        await w.reminders.edit(rid) { $0.isRepeating = false; $0.recurrence = nil; $0.due = DueDate(day: due) }
+        return (w, rid)
+    }
+
+    @Test func withTwoOpenOccurrencesTheOneOnTheReminderDueDayIsLinked() async throws {
+        var (w, rid) = try await pairWithTwoOccurrences(due: "2026-11-16")
+        let r = try await w.sync()
+        #expect(r.failures == 0 && r.unlinked == 0)
+        #expect(await w.things.stops == ["TPL"])
+        #expect(w.links.links.count == 1 && w.links.links[0].reminderId == rid && w.links.links[0].thingsId == "OCC1")
+        let writes = await w.things.updates
+        #expect(writes.count == 1 && writes[0].1 == ThingsTodoPatch(trashed: true))
+        #expect(await w.things.task(writes[0].0)?.trashed == true)
+        #expect(r.log.contains { $0.message.contains("1 other open to-do of the repeat stays in Things, not linked") })
+        // The other occurrence is a plain to-do of the list now: it gets its own reminder, and the trashed one none.
+        let leftover = try #require(await w.things.task("OCC0"))
+        #expect(!leftover.trashed && !leftover.isOccurrence)
+        let next = try await w.sync()
+        #expect(next.createdInReminders == 1 && next.createdInThings == 0)
+        #expect(w.links.links.count == 2 && w.links.links.contains { $0.thingsId == "OCC0" && $0.reminderId != rid })
+        #expect(await w.reminders.all(in: "L1").map { $0.due?.day }.sorted { ($0 ?? "") < ($1 ?? "") } == ["2026-11-09", "2026-11-16"])
+        #expect(try await w.sync().changeCount == 0)
+    }
+
+    @Test func withTwoOpenOccurrencesAndNoneOnTheDueDayTheEarliestIsLinked() async throws {
+        var (w, rid) = try await pairWithTwoOccurrences(due: "2026-11-18")
+        let r = try await w.sync()
+        #expect(r.failures == 0)
+        #expect(w.links.links.count == 1 && w.links.links[0].reminderId == rid && w.links.links[0].thingsId == "OCC0")
+        // The reminder's date reaches the linked to-do as an ordinary update, after the trash of the next-day to-do.
+        let writes = await w.things.updates
+        #expect(writes.count == 2 && writes[0].1 == ThingsTodoPatch(trashed: true))
+        #expect(writes[1].0 == "OCC0" && writes[1].1.when == .some(DueDate(day: "2026-11-18")))
+        #expect(await w.things.task("OCC1")?.trashed == false)
+    }
+
+    @Test func aFailedTrashOfTheNextDayToDoNeverMakesASecondReminder() async throws {
+        var w = try await stoppablePair()
+        let rid = w.links.links[0].reminderId
+        await w.reminders.edit(rid) { $0.isRepeating = false; $0.recurrence = nil }
+        await w.things.failNextUpdate()
+        let r = try await w.sync()
+        #expect(r.failures == 1 && w.links.links.count == 1 && w.links.links[0].thingsId == "OCC1")
+        let extra = try #require(await w.things.all().first { $0.id != "OCC1" })
+        #expect(!extra.trashed && w.links.detachedThingsIds.contains(extra.id))
+        let next = try await w.sync()
+        #expect(next.changeCount == 0 && w.links.links.count == 1)
+        #expect(await w.reminders.all(in: "L1").count == 1)
+    }
+
+    @Test func aFinishedReminderThatNoLongerRepeatsLeavesTheTemplateAlone() async throws {
+        var w = try await stoppablePair()
+        let rid = w.links.links[0].reminderId
+        await w.reminders.edit(rid) { $0.isRepeating = false; $0.recurrence = nil; $0.completed = true; $0.completionDate = Date() }
+        let r = try await w.sync()
         #expect(r.unlinked == 1 && w.links.links.isEmpty)
-        let trashed = await w.things.trashedIds(), writes = await w.things.updates
-        #expect(trashed.isEmpty && writes.isEmpty)
-        #expect(await w.reminders.item(rid) != nil)
+        let stops = await w.things.stops, kept = await w.things.task("TPL")
+        #expect(stops.isEmpty && kept?.isTemplate == true)
+    }
+
+    @Test func aFailedStopKeepsThePairAndIsRetried() async throws {
+        var w = try await stoppablePair()
+        let rid = w.links.links[0].reminderId
+        await w.reminders.edit(rid) { $0.isRepeating = false; $0.recurrence = nil }
+        await w.things.failNextStop()
+        let r = try await w.sync()
+        #expect(r.failures == 1 && w.links.links.first?.thingsId == "TPL" && w.links.links.first?.repeatMode == .template)
+        try await w.sync()
+        #expect(await w.things.stops == ["TPL"])
+        #expect(w.links.links.first?.repeatMode == nil)
+    }
+
+    @Test func aTemplateStoppedInThingsClearsTheReminderRepeatAndLinksThePlainToDo() async throws {
+        var w = try await stoppablePair()
+        let rid = w.links.links[0].reminderId
+        await w.things.stopInThings("TPL", newId: "N1")
+        let r = try await w.sync()
+        #expect(r.failures == 0 && r.deletedInReminders == 0 && r.unlinked == 0)
+        let writes = await w.reminders.recurrenceWrites
+        #expect(writes.count == 1 && writes[0].id == rid && writes[0].rule == nil)
+        let reminder = try #require(await w.reminders.item(rid))
+        #expect(!reminder.isRepeating && reminder.due == DueDate(day: "2026-11-23"), "it follows the to-do Things kept for the next day")
+        let link = try #require(w.links.links.first { $0.reminderId == rid })
+        #expect(link.thingsId == "N1" && link.repeatMode == nil && link.fingerprint.rule == nil && link.fingerprint.due == DueDate(day: "2026-11-23"))
+        let stops = await w.things.stops, thingsWrites = await w.things.updates
+        #expect(stops.isEmpty && thingsWrites.isEmpty, "nothing is written to Things")
+        // The occurrence Things detached is a plain to-do now and syncs as one.
+        #expect(w.links.links.contains { $0.thingsId == "OCC1" && $0.repeatMode == nil })
+        #expect(await w.reminders.all(in: "L1").count == 2)
+        #expect(try await w.sync().changeCount == 0)
+    }
+
+    @Test func aStoppedTemplateWhoseReminderAlreadyLostItsRepeatIsOnlyRelinked() async throws {
+        var w = try await stoppablePair()
+        let rid = w.links.links[0].reminderId
+        await w.reminders.edit(rid) { $0.isRepeating = false; $0.recurrence = nil; $0.due = DueDate(day: "2026-11-23") }
+        await w.things.stopInThings("TPL", newId: "N1")
+        await w.reminders.clearPatches()
+        try await w.sync()
+        #expect(await w.reminders.patches.filter { $0.id == rid }.isEmpty)
+        #expect(w.links.links.first { $0.reminderId == rid }?.thingsId == "N1")
+    }
+
+    @Test func aStoppedTemplateWithNoMatchingPlainToDoIsStillADeletion() async throws {
+        var w = try await stoppablePair()
+        let rid = w.links.links[0].reminderId
+        await w.things.stopInThings("TPL", newId: "N1")
+        await w.things.edit("N1") { $0.title = "Something else" }
+        let r = try await w.sync()
+        let gone = await w.reminders.item(rid)
+        #expect(r.deletedInReminders == 1 && gone == nil)
     }
 
     @Test func movingTheTemplateToAnotherSyncedListMovesTheReminder() async throws {

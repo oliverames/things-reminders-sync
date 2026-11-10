@@ -52,6 +52,76 @@ the first date is in the future, is deleted. Template fields observed (Things 3.
   themselves when `icsd` arrives (a template with `icc` 0 and a future `icsd` got its first occurrence
   only when that day came). A sync therefore writes templates only and never fabricates occurrences.
 
+### Edits to an existing repeat (Things 3.24.2 Mac app, 2026-11-09, history indexes 1688 to 1700)
+
+Each change was made in the Mac app and read back from Things Cloud history. `1794182400` is 2026-11-09,
+`1794268800` is 2026-11-10. Things wrote entity `Task7`; this app writes `Task6` for every task change, as it
+always has (docs/SPEC.md).
+
+**To-do made repeating** (Items > Repeat, daily, OK, on 2026-11-09; the to-do had no date). The to-do becomes
+today's occurrence and a new template is created:
+
+    7FxH2V7SdsAwEvq59evaxb {"t":1,"e":"Task7","p":{"tir":1794182400,"md":1794274843.075597,"rt":["LFwb2zkVA7nCqRm1BMEfkk"],"sr":1794182400}}
+    LFwb2zkVA7nCqRm1BMEfkk {"t":0,"e":"Task7","p":{"sr":null,"rt":[],"ss":0,"tr":false,"st":2,"tt":"Repeat edit sample","tir":1794268800,"icc":1,"icsd":1794268800,"md":1794274843.07671,"rr":{"of":[{"dy":0}],"rrv":4,"tp":0,"ts":0,"fu":16,"ia":1794182400,"fa":1,"sr":1794182400,"rc":0,"ed":64092211200}, ...}}
+
+The app reads this (the link moves to the template) and never writes it: it creates templates only.
+
+**Rule edited** (Items > Repeat > Edit Rule, daily changed to weekly, OK; the sheet set the weekday to the
+template's next day, Tuesday 2026-11-10). Only the template is written, and only `md` and `rr`:
+
+    LFwb2zkVA7nCqRm1BMEfkk {"t":1,"e":"Task7","p":{"md":1794274921.023453,"rr":{"of":[{"wd":2}],"rrv":4,"tp":0,"ts":0,"fu":256,"ia":1794268800,"fa":1,"sr":1794182400,"rc":0,"ed":64092211200}}}
+
+`rr.sr` kept the old rule's `sr` (2026-11-09). `rr.ia` became the template's current `tir` (2026-11-10).
+`tir`, `icsd` and `icc` were not written, because the next day did not change. The app writes exactly this when
+a reminder's rule changes and its date does not: `md` and `rr`, with the old `sr` and `ia` set to the template's
+`tir`. An edit that moves the next day was not sampled. When a rule change and a new next day arrive together
+the app writes `md`, `rr`, `tir`, `icsd` and `ato`, and keeps the old `ia`. That is the app's own choice, not a
+sampled shape. An old rule that repeats after completion has no `ia` to keep, so the new rule's `ia` and `sr`
+are the template's next day; that is also the app's own choice.
+
+**Paused and resumed** (Items > Repeat > Pause, then Resume):
+
+    LFwb2zkVA7nCqRm1BMEfkk {"t":1,"e":"Task7","p":{"icp":true,"md":1794274947.122859}}
+    LFwb2zkVA7nCqRm1BMEfkk {"t":1,"e":"Task7","p":{"icp":false,"md":1794274971.49046}}
+
+A paused template is still a template: the app keeps the pair linked and the reminder keeps its rule. The app
+never writes `icp` on an existing task.
+
+**Stopped** (Items > Repeat > Stop, confirmed with "Stop It"). One commit with three entries: a new plain to-do
+for the next day, the open occurrence detached with no `md`, and the template deleted for good:
+
+    BZyaBocoogxB7WEcbQT7r {"t":0,"e":"Task7","p":{"tp":0,"sr":1794268800,"dds":null,"rt":[],"rmd":null,"ss":0,"tr":false,"dl":[],"icp":false,"st":2,"ar":[],"tt":"Repeat edit sample","do":0,"lai":null,"tir":1794268800,"tg":[],"agr":[],"ix":0,"cd":1794274999.166278,"lt":true,"icc":0,"ti":0,"md":null,"dd":null,"ato":null,"nt":{"_t":"tx","ch":0,"v":"","t":1},"icsd":null,"pr":["XN4eGArARmEF2vzS84p12i"],"rp":null,"acrd":null,"sp":null,"sb":0,"rr":null,"xx":{"sn":{},"_t":"oo"}}}
+    7FxH2V7SdsAwEvq59evaxb {"t":1,"e":"Task7","p":{"rt":[]}}
+    LFwb2zkVA7nCqRm1BMEfkk {"t":2,"e":"Task7","p":{}}
+
+The app writes this commit (`ThingsCloudClient.stopRepeating`) when the reminder of a template pair loses its
+repeat: the same 34 keys on the create, with `lt` true, `md` null, `icsd` null, `rr` null, `ato` null, `st` 2
+and `sr` = `tir` = the template's next day; `{"rt":[]}` and nothing else on every open, untrashed occurrence;
+and the tombstone. Title, `pr`, `agr` and `ar` are copied from the template. The sampled template had no notes
+and no tags, so the sample shows `nt` empty and `tg` `[]`; the app writes the template's own notes and tags
+there, which gives the sampled values for a template that has none. Whether Things itself carries notes, tags,
+a reminder time or checklist items over to the plain to-do was not sampled. The app leaves `ato` null as
+sampled and writes no checklist items in this commit; the reminder's time and subtasks reach the new to-do
+afterwards as ordinary updates. The validator needed no change for these entries.
+
+Which to-do the reminder is linked to afterwards depends on the open, untrashed occurrences the template had
+when it was stopped. The Stop commit itself is the same in every case.
+
+- None: the reminder is linked to the new plain to-do for the next day.
+- One: the reminder is linked to that occurrence, which the commit detached. It is the item the person was
+  looking at. The new next-day to-do is then moved to the Trash with the ordinary trash update (`tr` true), so
+  Things does not show the item twice. The reminder's date and other fields reach the occurrence as ordinary
+  updates in the same pass or the next.
+- Two or more: the reminder is linked to the occurrence whose start day is the reminder's due day when exactly
+  one matches, otherwise to the earliest. The new next-day to-do is trashed as above. The other occurrences
+  stay in Things as plain to-dos and are not linked. They are ordinary unlinked to-dos of the list from then on,
+  so the next pass gives each its own reminder, as it does when Stop is done in Things.
+
+The trashed to-do never gets a reminder, because trashed to-dos are outside every list. If the trash write
+fails, the pass reports the failure, the to-do stays in Things, and the app marks it so that it is never copied
+to Reminders. The trash write is not retried. Stop followed by a trash of the new to-do was not sampled as one
+action in Things; each of the two writes was.
+
 ## Reminders (RemCTL `recurrence` in `export --json`)
 
 All samples had due 2026-11-10 (all-day).

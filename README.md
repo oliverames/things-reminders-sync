@@ -103,6 +103,8 @@ A repeating reminder pairs with a Things repeating to-do, and the rule syncs bot
 
 You can add a repeat to an item that is already synced. Add it in Things and the reminder gets the same rule. Add it in Reminders and the Things to-do stands for the current occurrence; when you complete it, Things gets a repeating to-do for the rule. A new time for a repeating reminder is written to the Things repeating to-do as well, so later occurrences keep it.
 
+Stop a repeat in either app and the pair carries on as a plain item. Remove the repeat from the reminder and the app stops the Things repeating to-do the way Things does: it leaves a plain to-do, and to-dos Things already made for earlier dates stay in Things. Stop the repeat in Things and the reminder loses its rule and follows the to-do Things keeps for the next date. Pausing a repeat in Things changes nothing in Reminders.
+
 Some rules only one app can express. Reminders has no "repeat after completion," and RemCTL can't write every rule Reminders supports. When that happens, the app syncs the current occurrence as a plain item and logs why.
 
 ## How it stays safe

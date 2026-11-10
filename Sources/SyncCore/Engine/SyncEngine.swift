@@ -504,6 +504,13 @@ final class SyncPass {
             else { unlink(link, "reminder deleted (deletes are not propagated)") }
             return
         case (_, true):
+            // Stop in Things deletes the template for good and keeps a plain to-do for its next day: the pair carries
+            // on with that to-do. (A trashed template is still there and is a deletion, below.)
+            if link.repeatMode == .template, task == nil, let r = reminder, !r.completed,
+               let plain = stoppedSuccessor(for: link, mapping: mapping) {
+                await continueStoppedPair(link, reminder: r, task: plain)
+                return
+            }
             // Things removes a to-do that was given a repeat with a first date in the future and keeps a new template:
             // the pair moves to the template instead of the reminder being deleted.
             if link.repeatMode == nil, let r = reminder, !r.completed,
@@ -516,7 +523,7 @@ final class SyncPass {
             return
         default: break
         }
-        guard var reminder, let task else { return }
+        guard var reminder, var task else { return }
         var link = link
 
         switch link.repeatMode {
@@ -530,7 +537,13 @@ final class SyncPass {
                     log(.change, "Removed the repeat from reminder \"\(reminder.title)\": the Things to-do no longer repeats")
                 } catch { fail("Could not remove the repeat from \"\(title)\": \(error.localizedDescription)"); return }
             } else if !reminder.isRepeating {
-                unlink(link, "the reminder no longer repeats"); return
+                // The reminder lost its repeat: the template is stopped as Things' own Stop does, and the pair carries
+                // on below as a plain one, on the template's open occurrence or, without one, on the to-do for its
+                // next day. A finished reminder (its last occurrence is done) and a template with no next day are
+                // left alone, as before.
+                guard !reminder.completed, task.nextDay != nil else { unlink(link, "the reminder no longer repeats"); return }
+                do { (link, task) = try await stopTemplate(link, template: task, reminder: reminder) }
+                catch { fail("Could not stop the repeat of \"\(title)\" in Things: \(error.localizedDescription)"); return }
             }
         case .reminderRepeats:
             if task.isRepeating { unlink(link, "the Things to-do became repeating"); return }

@@ -137,6 +137,26 @@ enum ThingsChanges {
         return ["st": 2, "sb": 0, "sr": nil, "tir": .number(ts), "icsd": .number(ts), "ato": ato]
     }
 
+    /// The three entries Things 3.24.2 wrote for Items > Repeat > Stop (docs/RECURRENCE.md), as one change map: a plain
+    /// to-do for the template's next day (`sr` = `tir` = that day, `st` 2, `lt` true, `md` null), `rt []` and nothing
+    /// else on each open occurrence, and a tombstone for the template. Title, notes, tags and container are the template's.
+    static func stopRepeating(templateId: String, template: ThingsTask, tags: [String], openOccurrences: [String],
+                              newId: String, now: Date) throws -> ThingsChangeMap {
+        guard let day = template.nextDay else {
+            throw ThingsCloudError.invalidChange(["repeating to-do \(templateId) has no next day, so there is nothing to continue as a plain to-do"])
+        }
+        let ts = JSONValue.number(try ThingsDates.timestamp(forDay: day))
+        func ids(_ id: String?) -> JSONValue { idArray(id.map { [$0] } ?? []) }
+        let plain = taskCreate(
+            title: template.title, notes: template.notes, type: 0,
+            scheduling: ["st": 2, "sb": 0, "sr": ts, "tir": ts, "ato": nil],
+            containers: ["pr": ids(template.projectId), "agr": ids(template.headingId), "ar": ids(template.areaId)],
+            tags: tags, completed: false, completionDate: nil, now: now, extra: ["lt": true, "md": nil])
+        var map: ThingsChangeMap = [newId: plain, templateId: ThingsChange(t: 2, e: ThingsEntity.task, p: [:])]
+        for id in openOccurrences { map[id] = ThingsChange(t: 1, e: ThingsEntity.task, p: ["rt": []]) }
+        return map
+    }
+
     /// `ChecklistItem3` exactly as Things 3.24.2 writes one (docs/SPEC.md): `ts` is the parent task, items sort by `ix`.
     /// Completion is `ss` 3 with `sp`, like a to-do.
     static func checklistCreate(taskId: String, title: String, completed: Bool, index: Double, now: Date) -> ThingsChange {

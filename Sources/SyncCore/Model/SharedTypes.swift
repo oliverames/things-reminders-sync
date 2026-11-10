@@ -244,8 +244,12 @@ public struct ThingsSnapshot: Sendable {
     public var tasks: [String: ThingsTask]
     public var areas: [String: ThingsArea]
     public var tags: [String: ThingsTag]
-    public init(tasks: [String: ThingsTask] = [:], areas: [String: ThingsArea] = [:], tags: [String: ThingsTag] = [:]) {
-        self.tasks = tasks; self.areas = areas; self.tags = tags
+    /// Repeating templates that were deleted for good (a `t` 2 tombstone, which is what Stop in Things writes), with
+    /// the next day (`tir`) each had at that moment. A trashed template is still in `tasks` and is not listed here.
+    public var removedTemplates: [String: String]
+    public init(tasks: [String: ThingsTask] = [:], areas: [String: ThingsArea] = [:], tags: [String: ThingsTag] = [:],
+                removedTemplates: [String: String] = [:]) {
+        self.tasks = tasks; self.areas = areas; self.tags = tags; self.removedTemplates = removedTemplates
     }
     public var projects: [ThingsTask] { tasks.values.filter { $0.kind == .project && !$0.trashed } }
     public var headings: [ThingsTask] { tasks.values.filter { $0.kind == .heading && !$0.trashed } }
@@ -269,6 +273,10 @@ public protocol ThingsBackend: Sendable {
     /// Creates a to-do and returns its new id. Validated before anything is sent.
     func createTodo(_ draft: ThingsTodoDraft) async throws -> String
     func updateTodo(id: String, patch: ThingsTodoPatch) async throws
+    /// Stops a repeating template the way Things' own Stop does (docs/RECURRENCE.md), in one commit: the template is
+    /// deleted for good, its open occurrences are detached, and a plain to-do is created for the template's next day
+    /// with its title, notes, tags and container. Returns the id of that plain to-do.
+    func stopRepeating(templateId: String) async throws -> String
     func createProject(title: String, areaId: String?) async throws -> String
     /// Creates a heading inside a project (Anytime) and returns its id.
     func createHeading(title: String, projectId: String) async throws -> String

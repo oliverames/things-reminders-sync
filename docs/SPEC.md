@@ -260,8 +260,8 @@ read back from history): `{"tt":"Alpha","ss":0,"sp":null,"ix":-518,"ts":["<task 
 -310, 0 for Alpha, Beta, Gamma). The client writes the same keys (new items get `ix` after the last existing one). Edits made in
 the Things 3.24.2 Mac app on 2026-11-09 were read back from history index 1644: completing an item wrote
 `{"t":1,"e":"ChecklistItem3","p":{"ss":3,"md":<now>,"sp":<now>}}`, renaming wrote `{"t":1,...,"p":{"md":<now>,"tt":"Beta renamed"}}`,
-and removing wrote `{"t":2,"e":"ChecklistItem3","p":{}}`. The client writes exactly these. Reopening a completed item (`ss` 0,
-`sp` null) mirrors the create shape and has not been sampled. The validator
+and removing wrote `{"t":2,"e":"ChecklistItem3","p":{}}`. Reopening a completed item (cmd-K, sampled the same day) wrote
+`{"t":1,"e":"ChecklistItem3","p":{"md":1794274720.19473,"sp":null,"ss":0}}`. The client writes exactly these. The validator
 checks every checklist key it writes (exactly one parent id in `ts`, `ss` in 0/2/3, finite `ix`, timestamps). The parent to-do
 was written in the same commit as `Task7`, with `md` set on create (so `md` on creates is safe).
 
@@ -281,8 +281,22 @@ validator are in docs/RECURRENCE.md; code in `Engine/RepeatSync.swift`.
   reminder and its occurrences sync as plain pairs. Fallback B (a Reminders rule with no verified
   Things shape): Things gets a plain to-do for the current occurrence, replaced when the reminder
   advances (`repeatMode` `.reminderRepeats`).
-- A template that stops repeating clears the reminder's rule; a reminder that stops repeating unlinks
-  the pair. Deleting the reminder trashes the template and its open occurrences.
+- A reminder that stops repeating stops its template with the commit Things' own Stop wrote (docs/RECURRENCE.md,
+  `stopRepeating`): the template is deleted for good, its open occurrences are detached, and a plain to-do is
+  created for the template's next day. With no open occurrence the link moves to that to-do. With one, the link
+  moves to the detached occurrence and the new to-do is trashed with an ordinary update. With several, the
+  occurrence on the reminder's due day is linked when exactly one matches, otherwise the earliest; the others
+  stay unlinked and get their own reminders on the next pass. The pair is merged as a plain one in the same
+  pass, so the reminder's date reaches the linked to-do as an ordinary update. A reminder that is completed and
+  no longer repeats, or a template with no next day, unlinks the pair instead.
+- A template stopped in Things is a tombstone (`ThingsSnapshot.removedTemplates` keeps the `tir` day it had).
+  The reminder's repeat is cleared (`--recurrence clear`), it takes the date of the plain to-do Things created,
+  and the link moves to that to-do: the only open, unlinked, non-repeating to-do in the list's target with the
+  same title whose `tir` and start day are that day. With no such to-do the tombstone is a deletion, like a
+  trashed template. The occurrences Things detached are plain to-dos and sync as new items.
+- A template that loses its rule but still exists clears the reminder's rule. A paused template (`icp` true) is
+  still a template and the pair is left as it is. Deleting the reminder trashes the template and its open
+  occurrences.
 - A new time on the same day for a repeating reminder moves the open occurrence and also writes `ato` on the
   template (`templateMinutes`), so the occurrences Things makes later keep the time.
 - A plain pair that becomes repeating stays linked. In Things, a repeat puts the rule on a NEW template and makes

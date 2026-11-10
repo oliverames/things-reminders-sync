@@ -396,6 +396,126 @@ extension SyncPass {
         }
     }
 
+    // MARK: A template pair that stopped repeating
+
+    /// Stops the template of a pair whose reminder no longer repeats (`ThingsBackend.stopRepeating`, the shape Things'
+    /// own Stop wrote) and moves the link to a plain to-do. Returns the link and that to-do as it now is, so the pass
+    /// goes on to merge the pair as a plain one, and the reminder's fields reach the to-do as ordinary changes from
+    /// Reminders.
+    ///
+    /// With no open occurrence the link moves to the plain to-do the Stop commit made for the template's next day.
+    /// With one, the link moves to that occurrence, which the commit detached (it is the item the person was looking
+    /// at), and the new next-day to-do goes to the Trash with an ordinary update, so Things does not show the item
+    /// twice. With several, the occurrence on the reminder's due day is kept when exactly one is, else the earliest;
+    /// the others stay in Things as plain to-dos, unlinked, and sync as new items on the next pass.
+    func stopTemplate(_ link: LinkRecord, template t: ThingsTask, reminder: ReminderItem) async throws -> (LinkRecord, ThingsTask) {
+        guard let day = t.nextDay else { throw ThingsCloudError.invalidChange(["\"\(t.title)\" has no next day"]) }
+        let open = openOccurrences(of: t.id)
+        let mappingId = thingsScope[t.id]
+        let id = try await things.stopRepeating(templateId: t.id)
+
+        var plain = t
+        plain.id = id
+        plain.isRepeating = false; plain.recurrence = nil; plain.instanceDay = nil; plain.instancesCreated = nil
+        plain.start = .someday; plain.startDate = day; plain.reminderSeconds = nil
+        plain.checklist = []
+        plain.creationDate = Date(); plain.modificationDate = nil; plain.fieldModified = nil
+        snapshot.tasks[t.id] = nil
+        snapshot.tasks[id] = plain
+        thingsScope[t.id] = nil
+        for o in open {
+            snapshot.tasks[o.id]?.templateId = nil
+            snapshot.tasks[o.id]?.isRepeating = false
+        }
+
+        var updated = link
+        updated.repeatMode = nil
+        updated.fingerprint.rule = nil
+        updated.fingerprint.completed = false; updated.fingerprint.completionDay = nil
+        // No agreed items: the next merge adds what either side lacks and removes nothing.
+        updated.fingerprint.checklist = nil
+        updated.lastSynced = Date()
+        report.updatedInThings += 1
+
+        let onDueDay = open.filter { $0.startDate != nil && $0.startDate == reminder.due?.day }
+        guard let pick = onDueDay.count == 1 ? onDueDay[0] : open.first, let kept = snapshot.tasks[pick.id] else {
+            // What the new to-do holds: the template's next day with no time.
+            thingsScope[id] = mappingId
+            updated.thingsId = id
+            updated.fingerprint.due = DueDate(day: day)
+            replace(updated)
+            log(.change, "Stopped the repeat of Things to-do \"\(t.title)\": its reminder no longer repeats")
+            return (updated, plain)
+        }
+
+        // The link is saved on the occurrence before the trash write, so a failure there cannot leave it on the
+        // deleted template. The fingerprint holds the occurrence's own title and date: where the reminder differs,
+        // that is a change from Reminders.
+        thingsScope[kept.id] = mappingId
+        updated.thingsId = kept.id
+        updated.fingerprint.title = Fingerprint.normalize(kept.title)
+        updated.fingerprint.due = kept.due
+        replace(updated)
+        do {
+            try await things.updateTodo(id: id, patch: ThingsTodoPatch(trashed: true))
+            snapshot.tasks[id]?.trashed = true
+        } catch {
+            // Still in Things, and never copied to Reminders: that would be the duplicate this avoids.
+            store.detachedThingsIds.insert(id)
+            fail("Stopped the repeat of \"\(t.title)\" but could not trash the extra to-do Things made for \(day): \(error.localizedDescription)")
+        }
+        let others = open.count - 1
+        log(.change, "Stopped the repeat of Things to-do \"\(t.title)\": its reminder no longer repeats and is linked to the open to-do"
+            + (kept.startDate.map { " for \($0)" } ?? "")
+            + (others > 0 ? "; \(others) other open to-do\(others == 1 ? "" : "s") of the repeat stay\(others == 1 ? "s" : "") in Things, not linked to it" : ""))
+        return (updated, kept)
+    }
+
+    /// The plain to-do Things kept when a linked template was stopped there: the only open, unlinked, non-repeating
+    /// to-do in the list's target with the same title whose `tir` and start day are the next day the template had
+    /// when it was deleted. Nil when the template was not deleted for good, or nothing (or more than one item) fits.
+    func stoppedSuccessor(for link: LinkRecord, mapping: ListMapping) -> ThingsTask? {
+        guard let day = snapshot.removedTemplates[link.thingsId] else { return nil }
+        let taken = Set(store.links.map(\.thingsId))
+        let title = link.fingerprint.title.lowercased()
+        let hits = snapshot.tasks.values.filter {
+            $0.kind == .todo && !$0.trashed && !$0.isRepeating && $0.status == .open && $0.nextDay == day && $0.startDate == day
+                && thingsScope[$0.id] == mapping.id && !taken.contains($0.id) && !store.detachedThingsIds.contains($0.id)
+                && Fingerprint.normalize($0.title).lowercased() == title
+        }
+        return hits.count == 1 ? hits[0] : nil
+    }
+
+    /// A template stopped in Things: the reminder's repeat is cleared (`remctl edit --recurrence clear`), it takes the
+    /// plain to-do's date, and the link moves to that to-do. Title, notes and the rest merge on the next pass.
+    func continueStoppedPair(_ link: LinkRecord, reminder: ReminderItem, task plain: ThingsTask) async {
+        var patch = ReminderPatch()
+        if reminder.isRepeating { patch.recurrence = .some(nil) }
+        if reminder.due != plain.due { patch.due = .some(plain.due) }
+        do {
+            var r = reminder
+            if !patch.isEmpty {
+                r = try await reminders.update(id: reminder.id, patch: patch)
+                report.updatedInReminders += 1
+            }
+            var updated = link
+            updated.reminderId = r.id; updated.reminderExternalId = r.externalId ?? link.reminderExternalId
+            updated.thingsId = plain.id
+            updated.repeatMode = nil
+            updated.fingerprint.rule = nil
+            updated.fingerprint.due = r.due
+            updated.fingerprint.completed = false; updated.fingerprint.completionDay = nil
+            // Whether Things copies a template's checklist to this to-do is not known: with no agreed items, the next
+            // pass adds what either side lacks and removes nothing.
+            updated.fingerprint.checklist = nil
+            updated.lastSynced = Date()
+            replace(updated)
+            log(.change, "\"\(plain.title)\" stopped repeating in Things; its reminder no longer repeats")
+        } catch {
+            fail("Could not remove the repeat from \"\(reminder.title)\": \(error.localizedDescription)")
+        }
+    }
+
     /// Deleting a repeating template also trashes its open occurrences (they would otherwise be left behind).
     func trashTemplateOccurrences(of id: String) async throws {
         guard snapshot.tasks[id]?.isTemplate == true else { return }

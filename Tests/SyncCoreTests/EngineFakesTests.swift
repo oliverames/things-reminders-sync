@@ -21,7 +21,35 @@ actor FakeThings: ThingsBackend {
     func clearRecords() { updates = []; created = [] }
 
     func refresh() async throws -> ThingsRefreshResult {
-        ThingsRefreshResult(snapshot: ThingsSnapshot(tasks: tasks, areas: areas, tags: tags), changedTaskIds: [], fullReload: false)
+        ThingsRefreshResult(snapshot: ThingsSnapshot(tasks: tasks, areas: areas, tags: tags, removedTemplates: removedTemplates),
+                            changedTaskIds: [], fullReload: false)
+    }
+
+    private(set) var removedTemplates: [String: String] = [:]
+    private(set) var stops: [String] = []
+    /// What Stop does (docs/RECURRENCE.md): the template is gone for good, its open occurrences are plain to-dos, and a
+    /// plain to-do exists for the template's next day. `stopInThings` is the user doing it in the Things app.
+    @discardableResult
+    func stopInThings(_ id: String, newId: String) -> String {
+        guard let t = tasks.removeValue(forKey: id), let day = t.nextDay else { return newId }
+        removedTemplates[id] = day
+        for (oid, o) in tasks where o.templateId == id && o.status == .open && !o.trashed {
+            tasks[oid]?.templateId = nil; tasks[oid]?.isRepeating = false; tasks[oid]?.nextDay = o.startDate
+        }
+        var plain = t
+        plain.id = newId; plain.isRepeating = false; plain.recurrence = nil; plain.instanceDay = nil; plain.instancesCreated = nil
+        plain.start = .someday; plain.startDate = day; plain.reminderSeconds = nil; plain.checklist = []
+        plain.creationDate = Date(); plain.modificationDate = nil
+        tasks[newId] = plain
+        return newId
+    }
+    private var failStop = false
+    func failNextStop() { failStop = true }
+    func stopRepeating(templateId: String) async throws -> String {
+        if failStop { failStop = false; throw Failure() }
+        guard tasks[templateId]?.isTemplate == true else { throw Failure() }
+        stops.append(templateId)
+        return stopInThings(templateId, newId: nextId("T"))
     }
 
     struct Failure: Error {}
@@ -65,7 +93,10 @@ actor FakeThings: ThingsBackend {
         return id
     }
 
+    private var failUpdate = false
+    func failNextUpdate() { failUpdate = true }
     func updateTodo(id: String, patch p: ThingsTodoPatch) async throws {
+        if failUpdate { failUpdate = false; throw Failure() }
         updates.append((id, p))
         guard var t = tasks[id] else { return }
         if let v = p.title { t.title = v }

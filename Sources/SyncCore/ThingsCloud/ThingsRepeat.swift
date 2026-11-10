@@ -25,8 +25,8 @@ enum ThingsRepeat {
     }
 
     /// The `rr` object for a rule, or nil when the rule has no observed Things shape. `start` is the first
-    /// occurrence day. `anchors` (an existing template's `ia`/`sr`) are kept when a rule is rewritten, so the
-    /// interval phase does not move.
+    /// occurrence day. `anchors` are the `ia` and `sr` a rewritten rule gets: the caller passes the old rule's `sr`
+    /// and, as Things does, the template's current next day for `ia` (docs/RECURRENCE.md, "Rule edited").
     static func rr(for rule: RepeatRule, start: String, anchors: (ia: Double, sr: Double)? = nil) -> JSONValue? {
         guard rule.isWellFormed, let startTs = try? ThingsDates.timestamp(forDay: start) else { return nil }
         var of: [JSONValue] = []
