@@ -83,6 +83,7 @@ struct ListOptionsSheet: View {
                 Text("Changes apply when you save the list.").font(.callout).foregroundStyle(.secondary)
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+                    .accessibilityLabel("Done with options for \(listTitle)")
             }
             .padding()
         }
@@ -179,7 +180,7 @@ struct ListOptionsSheet: View {
                 HStack {
                     TextField("Person", text: $row.sharee, prompt: Text("Email, sharee id or me"))
                         .labelsHidden()
-                        .accessibilityLabel("Person")
+                        .accessibilityLabel("Person to assign in \(listTitle)")
                     TagPicker(label: "Tag for \(row.sharee.isEmpty ? "this person" : row.sharee)",
                               selection: Binding(get: { row.tag.isEmpty ? nil : row.tag }, set: { row.tag = $0 ?? "" }),
                               known: tags, noneLabel: "Choose a tag…")
@@ -192,11 +193,13 @@ struct ListOptionsSheet: View {
                             .labelStyle(.iconOnly)
                     }
                     .buttonStyle(.borderless)
+                    .accessibilityLabel("Remove \(row.sharee.isEmpty ? "this person" : row.sharee)")
                     .help("Remove this person")
                 }
             }
             .disabled(reason(.assigneeTags) != nil)
             Button("Add Person…") { assignees.append(AssigneeTagRow()) }
+                .accessibilityLabel("Add a person for \(listTitle)")
                 .disabled(reason(.assigneeTags) != nil)
             help("Give a to-do a person's tag and its reminder is assigned to them. This works from Things to Reminders only, and only in a shared list. The app cannot list the people a list is shared with, so type the person's email address, sharee id or objectUUID, or \"me\" for yourself.",
                  unless: .assigneeTags)

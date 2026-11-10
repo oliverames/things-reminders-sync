@@ -489,7 +489,10 @@ validator are in docs/RECURRENCE.md; code in `Engine/RepeatSync.swift`.
   occurrence for the old day is completed. Any other due change is a reschedule. A due change that arrives with a
   new rule (the reminder's rule differs from the agreed `rule` in the fingerprint) is a rule edit and never an
   advance, even when the new date is the new rule's next occurrence: the open occurrence is moved to the new date
-  and the rule is copied. A `.reminderRepeats` pair keeps no agreed rule, so it cannot tell the two apart.
+  and the rule is copied. A `.reminderRepeats` pair does the same against the reminder's rule as last seen
+  (`reminderRule` in the fingerprint): the to-do moves to the new date and is not completed. A reminder given its
+  repeat and a new date together is read the same way. A link saved before `reminderRule` has none, so its first
+  pass reads the change as before and records the rule.
 - Rule edits copy the changed side's rule; both changed means the later edit of the rule wins. A due both sides moved goes
   to the later move (the open occurrence's time on the Things side, else the template's). A counted end
   (`rc`/`count`) is masked when comparing, because Reminders decrements it on each completion.

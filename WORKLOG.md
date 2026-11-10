@@ -1,5 +1,34 @@
 # Worklog
 
+## 2026-11-10: Reminder-only repeat edits and accessibility names in Settings
+
+Tests: `swift build` and `swift test --parallel`, 428 passing (was 425). The app was not launched, so the
+accessibility names were not read back on screen. Nothing was run against the real apps and nothing was committed.
+
+- Repeat misread closed for `.reminderRepeats` pairs. The fingerprint has a new optional `reminderRule`: the
+  reminder's rule as last seen. In `reminderRepeatsPlan` a due change that arrives with a different rule is an
+  edit that moves the open to-do, not an advance that completes it. A reminder given its repeat and a new date in
+  the same pass is read the same way (`ruleEdited`). The rule is recorded when the pair is created, when a template
+  pair falls back to this mode, when a plain to-do is replaced, and on every pass.
+- Old links.json files decode with `reminderRule` nil, which means unknown: that pass reads the change as before
+  and records the rule. A rule this app does not recognise is also stored as nil; such a rule never read as an
+  advance anyway.
+- New tests in `EngineRepeatTests.swift`: `reminderOnlyRuleAndDueChangedTogetherMovesTheToDo` (fails with the
+  check removed), `reminderOnlyPairWithNoRecordedRuleRecordsIt`, `fingerprintSavedBeforeTheReminderRuleStillDecodes`.
+  docs/SPEC.md describes the new behavior.
+- Accessibility: every control in a list row now has a label with the list's title ("Sync Family", "Mirror Family
+  as", "Pause syncing Family", "Options for Family", "Remove Family from sync", "Save changes to Family"). The
+  Options button also reports "Customized" or "Default options" as its value. The three steppers on the Options
+  tab have a label and a value ("Check Things every", "30 seconds"). The sheet's Done, Add Person and remove
+  buttons and the person field are labeled too. Visible text and layout are unchanged.
+- Cause of the missing names: not found in the code. The Options and Remove buttons have plain text titles and
+  nothing hides them, so SwiftUI should expose them. The explicit labels set the description the audit reads. The
+  stepper arrows are the two parts of the system stepper, which SwiftUI gives no way to name one by one; the label
+  and value now sit on the stepper itself.
+
+Not verified: an accessibility read of the running Settings window, including whether the two stepper arrow
+buttons still show without a name of their own.
+
 ## 2026-11-09: Settings controls for the per-list and tag options
 
 UI work on top of the engine keys below. Tests: `swift test --parallel`, 425 passing (was 416). The app was not
@@ -49,8 +78,8 @@ Decisions worth knowing:
   second project of that name in the area.
 - An empty Reminders section is invisible to the engine, so it does not make a project match.
 
-Known and left alone: a `.reminderRepeats` pair keeps no agreed rule in its fingerprint, so a rule and date
-changed together can still read as an advance there. An assignment whose write ended uncertain counts as failed.
+Known and left alone: an assignment whose write ended uncertain counts as failed. (The `.reminderRepeats` gap
+noted here was closed on 2026-11-10.)
 
 Not verified: `assign` and `unassign` against a real RemCTL and a shared list (the argument names come from
 RemCTL's published tool schema), and the project moves against the real Things apps.

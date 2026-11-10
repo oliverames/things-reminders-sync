@@ -171,6 +171,7 @@ private struct ListRow: View {
                 if current.enabled && current.paused { Text("Paused").foregroundStyle(.secondary) }
             }
         }
+        .accessibilityLabel("Sync \(list.title)")
         .disabled(!list.allowsModifications && !current.enabled)
         .confirmationDialog(stopRequest.map { $0.removeMapping ? "Remove “\(list.title)” from sync" : "Stop syncing “\(list.title)”" } ?? "",
                             isPresented: Binding(get: { stopRequest != nil }, set: { if !$0 { stopRequest = nil } }),
@@ -206,6 +207,7 @@ private struct ListRow: View {
                 Text("Tag").tag(MappingMode.tag)
                 Text("Heading").tag(MappingMode.heading)
             }
+            .accessibilityLabel("Mirror \(list.title) as")
             if current.mode == .heading {
                 Picker("Project", selection: Binding(get: { current.parentProjectId ?? Self.chooseTag }, set: { value in
                     guard value != Self.chooseTag, value != current.parentProjectId else { return }
@@ -217,6 +219,7 @@ private struct ListRow: View {
                     if current.parentProjectId == nil { Text("Choose…").tag(Self.chooseTag) }
                     ForEach(coordinator.thingsProjects) { Text($0.title).tag($0.id) }
                 }
+                .accessibilityLabel("Project for \(list.title)")
             }
             if current.mode != .heading || current.parentProjectId != nil {
                 Picker(targetLabel, selection: Binding(get: {
@@ -233,6 +236,7 @@ private struct ListRow: View {
                     ForEach(targets, id: \.id) { Text($0.title).tag($0.id) }
                     Text("New…").tag(Self.newTag)
                 }
+                .accessibilityLabel("\(targetLabel) for \(list.title)")
             }
             if current.mode == .heading && current.parentProjectId == nil {
                 Text("Choose the Things project that holds the heading. Syncing for this list is paused until you choose a heading.")
@@ -242,7 +246,7 @@ private struct ListRow: View {
                     .font(.callout).foregroundStyle(.secondary)
             }
             if current.targetId == nil && (creatingNew || !current.awaitingTarget) {
-                NewTargetFields(title: current.targetTitle, mode: current.mode, areaId: current.projectAreaId,
+                NewTargetFields(listTitle: list.title, title: current.targetTitle, mode: current.mode, areaId: current.projectAreaId,
                                 areas: coordinator.thingsAreas,
                                 onTitle: { value in edit { $0.targetTitle = value } },
                                 onArea: { value in edit { $0.projectAreaId = value } })
@@ -254,15 +258,19 @@ private struct ListRow: View {
             }
             if current.mode == .project {
                 Toggle("Sync sections as headings", isOn: Binding(get: { current.syncSections }, set: { value in edit { $0.syncSections = value } }))
+                    .accessibilityLabel("Sync sections of \(list.title) as headings")
             }
             if current.mode == .heading {
                 Text("The list mirrors the to-dos under this heading. Sections are not synced.")
                     .font(.callout).foregroundStyle(.secondary)
             }
             Toggle("Pause syncing", isOn: Binding(get: { current.paused }, set: { value in edit { $0.paused = value } }))
+                .accessibilityLabel("Pause syncing \(list.title)")
                 .help("A paused list keeps its links and settings. Nothing is copied either way until you turn this off.")
             LabeledContent {
                 Button("Options…") { showingOptions = true }
+                    .accessibilityLabel("Options for \(list.title)")
+                    .accessibilityValue(current.hasCustomPreferences ? "Customized" : "Default options")
                     .help("Direction, dates, deletes, tags and sections for this list")
             } label: {
                 if current.hasCustomPreferences {
@@ -281,6 +289,7 @@ private struct ListRow: View {
             Button("Remove list from sync…", role: .destructive) {
                 stopRequest = StopRequest(config: nil, preview: coordinator.teardownPreview(listId: list.id), removeMapping: true)
             }
+            .accessibilityLabel("Remove \(list.title) from sync")
             .disabled(saving)
         }
         if isDirty {
@@ -288,8 +297,10 @@ private struct ListRow: View {
                 Label(saveSummary, systemImage: "pencil.circle").font(.callout).foregroundStyle(.secondary)
                 Spacer()
                 Button("Revert", action: revert).disabled(saving)
+                    .accessibilityLabel("Revert changes to \(list.title)")
                 Button(saving ? "Saving…" : "Save", action: save)
                     .buttonStyle(.borderedProminent).disabled(saving)
+                    .accessibilityLabel(saving ? "Saving \(list.title)" : "Save changes to \(list.title)")
             }
         }
     }
@@ -328,6 +339,7 @@ private struct ListRow: View {
 }
 
 private struct NewTargetFields: View {
+    let listTitle: String
     let title: String
     let mode: MappingMode
     let areaId: String?
@@ -343,11 +355,13 @@ private struct NewTargetFields: View {
             .onSubmit(commit)
             .onChange(of: focused) { _, isFocused in if !isFocused { commit() } }
             .onAppear { draft = title }
+            .accessibilityLabel("Name of the new \(mode.rawValue) for \(listTitle)")
         if mode == .project {
             Picker("Area (optional)", selection: Binding(get: { areaId ?? "" }, set: { onArea($0.isEmpty ? nil : $0) })) {
                 Text("None").tag("")
                 ForEach(areas) { Text($0.title).tag($0.id) }
             }
+            .accessibilityLabel("Area for the new project for \(listTitle)")
         }
     }
 

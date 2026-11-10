@@ -58,6 +58,10 @@ public struct Fingerprint: Codable, Hashable, Sendable {
     /// Set when an assignment write failed: the to-do's tags and the wanted sharee at that moment. The write is
     /// tried again only when either differs.
     public var assigneeFailed: String? = nil
+    /// For a `.reminderRepeats` pair (only the reminder repeats): the reminder's rule as last seen, compared through
+    /// `RepeatRule.key`. A due change that arrives with a different rule is an edit, not an advance. Nil means
+    /// unknown (links saved before this field, or a rule this app does not recognise).
+    public var reminderRule: RepeatRule? = nil
 
     public struct ChecklistEntry: Codable, Hashable, Sendable {
         public var title: String

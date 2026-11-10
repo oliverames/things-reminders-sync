@@ -359,6 +359,58 @@ struct EngineRepeatTests {
         #expect(try await w.sync().changeCount == 0)
     }
 
+    /// A `.reminderRepeats` pair on Monday weekly, due Mon 16, whose Things side is the plain to-do "PLAIN".
+    private func reminderOnlyWorld(recordedRule: RepeatRule?) async -> World {
+        var w = await world()
+        let monday = RepeatRule(frequency: .weekly, weekdays: [1])
+        await w.reminders.add(repeatingReminder("r1", rule: monday, due: DueDate(day: "2026-11-16")))
+        var fp = Fingerprint(title: "Water plants", notes: "", due: DueDate(day: "2026-11-16"), completed: false, completionDay: nil)
+        fp.reminderRule = recordedRule
+        var link = LinkRecord(reminderId: "r1", thingsId: "PLAIN", mappingId: "L1", fingerprint: fp, repeatMode: .reminderRepeats)
+        link.copySide = .things
+        await w.things.add(todo("PLAIN", "Water plants", project: "P1", startDate: "2026-11-16"))
+        w.links.links = [link]
+        return w
+    }
+
+    /// Regression: with only the reminder repeating, a rule change whose new due date is the new rule's next
+    /// occurrence was read as an advance, which completed the open to-do. Monday weekly becomes Tuesday weekly, due
+    /// moves from Mon 16 to Tue 17.
+    @Test func reminderOnlyRuleAndDueChangedTogetherMovesTheToDo() async throws {
+        var w = await reminderOnlyWorld(recordedRule: RepeatRule(frequency: .weekly, weekdays: [1]))
+        let tuesday = RepeatRule(frequency: .weekly, weekdays: [2])
+        #expect(tuesday.nextOccurrence(after: "2026-11-16") == "2026-11-17", "the case under test: the new date is the new rule's next day")
+        await w.reminders.edit("r1") { $0.recurrence = tuesday; $0.due = DueDate(day: "2026-11-17") }
+        try await w.sync()
+        let writes = await w.things.updates
+        #expect(!writes.contains { $0.1.completed == true }, "a rule edit never completes the open to-do")
+        #expect(writes.contains { $0.0 == "PLAIN" && $0.1.when == .some(DueDate(day: "2026-11-17")) }, "the to-do moves to the new day")
+        #expect(await w.things.task("PLAIN")?.status == .open)
+        let link = try #require(w.links.links.first)
+        #expect(link.thingsId == "PLAIN" && link.repeatMode == .reminderRepeats)
+        #expect(link.fingerprint.due?.day == "2026-11-17" && link.fingerprint.reminderRule?.key == tuesday.key)
+        #expect(await w.reminders.completions.isEmpty)
+        await w.things.clearRecords()
+        #expect(try await w.sync().changeCount == 0)
+    }
+
+    /// A link saved before the rule was recorded: the first pass records it without writing anything.
+    @Test func reminderOnlyPairWithNoRecordedRuleRecordsIt() async throws {
+        var w = await reminderOnlyWorld(recordedRule: nil)
+        #expect(try await w.sync().changeCount == 0)
+        #expect(w.links.links.first?.fingerprint.reminderRule?.key == RepeatRule(frequency: .weekly, weekdays: [1]).key)
+        #expect(await w.things.updates.isEmpty)
+    }
+
+    @Test func fingerprintSavedBeforeTheReminderRuleStillDecodes() throws {
+        let old = #"{"title":"Water plants","notes":"","completed":false,"due":{"day":"2026-11-16"}}"#
+        let fp = try JSONDecoder().decode(Fingerprint.self, from: Data(old.utf8))
+        #expect(fp.reminderRule == nil && fp.due?.day == "2026-11-16")
+        var with = fp
+        with.reminderRule = RepeatRule(frequency: .weekly, weekdays: [2])
+        #expect(try JSONDecoder().decode(Fingerprint.self, from: JSONEncoder().encode(with)) == with)
+    }
+
     // MARK: Lifecycle
 
     @Test func deletingTheRepeatingReminderTrashesTheTemplateAndItsOpenOccurrence() async throws {

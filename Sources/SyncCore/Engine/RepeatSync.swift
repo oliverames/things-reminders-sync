@@ -282,6 +282,7 @@ extension SyncPass {
                 let id = try await things.createTodo(ThingsTodoDraft(title: r.title, notes: fields.notes, when: start.when, placement: placement,
                                                                      tagIds: allTags, checklist: fields.checklist, someday: start.someday))
                 fp.undatedThingsDay = start.undatedDay
+                fp.reminderRule = r.recurrence
                 store.links.append(LinkRecord(reminderId: r.id, reminderExternalId: r.externalId, thingsId: id, mappingId: m.id,
                                               fingerprint: fp, copySide: .things, repeatMode: .reminderRepeats))
                 report.createdInThings += 1
@@ -320,17 +321,24 @@ extension SyncPass {
 
     // MARK: `.reminderRepeats` pairs
 
+    /// `ruleEdited`: the reminder was given its repeat in this pass, so there is no earlier rule to compare with.
     func reminderRepeatsPlan(link: LinkRecord, reminder r: ReminderItem, task t: ThingsTask, group: GroupInput?,
-                             mapping: ListMapping? = nil) -> MergePlan {
+                             mapping: ListMapping? = nil, ruleEdited: Bool = false) -> MergePlan {
         var rEff = r
         var advance = false
         let base = link.fingerprint.due
-        if !r.completed, t.status == .open, let base, r.due != base, isAdvance(rule: r.recurrence, base: base, to: r.due) {
+        // A due change that comes with a new rule is a rule edit, never a completion, even when the new date is the
+        // new rule's next occurrence: the to-do moves instead. With no recorded rule (an older link) the rule cannot
+        // be compared, so that one pass reads the change as before.
+        let ruleChanged = ruleEdited || link.fingerprint.reminderRule.map { $0.key != r.recurrence?.key } ?? false
+        if !r.completed, t.status == .open, let base, r.due != base, !ruleChanged,
+           isAdvance(rule: r.recurrence, base: base, to: r.due) {
             advance = true
             rEff.due = base   // the due change is the advance, not a reschedule
         }
         var plan = merge(base: link.fingerprint, reminder: rEff, task: t, group: group, mapping: mapping)
         plan.fingerprint.rule = nil
+        plan.fingerprint.reminderRule = r.recurrence
         if advance {
             plan.thingsPatch.completed = true
             plan.replaceThings = true
@@ -362,6 +370,8 @@ extension SyncPass {
             draft.recurrence = rule
             fp.rule = rule
             mode = .template
+        } else {
+            fp.reminderRule = r.recurrence
         }
         let id = try await things.createTodo(draft)
         store.detachedThingsIds.insert(task.id)

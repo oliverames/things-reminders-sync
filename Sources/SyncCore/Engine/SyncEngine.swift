@@ -633,12 +633,14 @@ final class SyncPass {
         }
         guard var reminder, var task else { return }
         var link = link
+        var repeatAdded = false   // the reminder was given its repeat since the last pass
 
         switch link.repeatMode {
         case .template:
             if !task.isTemplate, source == .reminders {
                 // One way from Reminders: the reminder keeps its repeat, and the to-do stands for its current occurrence.
-                link.repeatMode = .reminderRepeats; link.fingerprint.rule = nil
+                link.repeatMode = .reminderRepeats
+                link.fingerprint.reminderRule = link.fingerprint.rule; link.fingerprint.rule = nil
                 replace(link)
                 log(.info, "\"\(reminder.title)\" no longer repeats in Things; the reminder keeps its repeat (this list syncs one way from Reminders)")
             } else if !task.isTemplate {
@@ -680,6 +682,7 @@ final class SyncPass {
                 // the repeat is a change on the receiving side, and the pair stays a plain one.
                 if source != .things {
                     link.repeatMode = .reminderRepeats
+                    repeatAdded = true
                     replace(link)
                     log(.info, "\"\(reminder.title)\" now repeats in Reminders; its Things to-do stands for the current occurrence")
                 }
@@ -755,7 +758,8 @@ final class SyncPass {
             plan.fingerprint.rule = link.fingerprint.rule
             templateExtras(link: link, reminder: reminder, task: task, plan: &plan, source: source)
         case .reminderRepeats where source != .things:
-            plan = reminderRepeatsPlan(link: link, reminder: reminder, task: task, group: groupInput, mapping: mapping)
+            plan = reminderRepeatsPlan(link: link, reminder: reminder, task: task, group: groupInput, mapping: mapping,
+                                       ruleEdited: repeatAdded)
         case .reminderRepeats, nil:
             // (One way from Things a `.reminderRepeats` pair merges as a plain one: the reminder moving on is a
             // change on the receiving side.)

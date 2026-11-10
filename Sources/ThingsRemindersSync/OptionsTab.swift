@@ -23,12 +23,18 @@ struct OptionsTab: View {
                 Stepper(value: $draft.pollSeconds, in: 10...300, step: 5) {
                     LabeledContent("Check Things every", value: "\(draft.pollSeconds) seconds")
                 }
+                .accessibilityLabel("Check Things every")
+                .accessibilityValue("\(draft.pollSeconds) seconds")
                 Stepper(value: $draft.remindersPollSeconds, in: 5...120, step: 5) {
                     LabeledContent("Check Reminders every", value: "\(draft.remindersPollSeconds) seconds")
                 }
+                .accessibilityLabel("Check Reminders every")
+                .accessibilityValue("\(draft.remindersPollSeconds) seconds")
                 Stepper(value: $draft.reconcileMinutes, in: 5...120, step: 5) {
                     LabeledContent("Full reconcile every", value: "\(draft.reconcileMinutes) minutes")
                 }
+                .accessibilityLabel("Full reconcile every")
+                .accessibilityValue("\(draft.reconcileMinutes) minutes")
             }
             Section("Behavior") {
                 Toggle("Include completed items on first link", isOn: $draft.includeCompletedOnFirstLink)
@@ -69,7 +75,9 @@ struct OptionsTab: View {
                         Label("Unsaved changes", systemImage: "pencil.circle").font(.callout).foregroundStyle(.secondary)
                         Spacer()
                         Button("Revert") { draft = coordinator.config }.disabled(saving)
+                            .accessibilityLabel("Revert option changes")
                         Button(saving ? "Saving…" : "Save", action: save).buttonStyle(.borderedProminent).disabled(saving)
+                            .accessibilityLabel(saving ? "Saving options" : "Save options")
                     }
                 }
             }
@@ -146,6 +154,7 @@ private struct LoginItemRow: View {
             Text("Approval needed in System Settings > General > Login Items.")
                 .font(.callout).foregroundStyle(.secondary)
             Button("Open Login Items Settings") { SMAppService.openSystemSettingsLoginItems() }
+                .accessibilityLabel("Open Login Items Settings")
         case .notFound:
             Text("Login item unavailable. Run the app from the built bundle in /Applications.")
                 .font(.callout).foregroundStyle(.secondary)
