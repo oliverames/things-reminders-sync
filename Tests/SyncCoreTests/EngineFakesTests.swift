@@ -275,7 +275,8 @@ actor FakeReminders: RemindersBackend {
         if let u = p.url, !ignoresURL { r.url = u }
         if let f = p.flagged, !ignoresFlag { r.flagged = f }
         if let pr = p.priority { r.priority = pr }
-        if let t = p.tags { r.tags = t }
+        // Like Reminders: a tag is a hashtag, so it is stored without whitespace.
+        if let t = p.tags { r.tags = t.map { $0.filter { !$0.isWhitespace } } }
         if let titles = p.addSubtasks, !ignoresSubtasks {
             for title in titles { subtaskCounter += 1; r.subtasks.append(ReminderSubtask(id: "S\(subtaskCounter)", title: title)) }
         }

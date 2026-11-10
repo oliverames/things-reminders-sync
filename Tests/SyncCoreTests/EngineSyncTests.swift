@@ -187,17 +187,33 @@ private func projectWorld() async -> World {
 
 @Test func deletionSafetyLimitTripsAndForceApplies() async throws {
     var w = await projectWorld()
-    for i in 1...4 { await w.things.add(todo("t\(i)", "Item \(i)", project: "P1")) }
+    for i in 1...5 { await w.things.add(todo("t\(i)", "Item \(i)", project: "P1")) }
     try await w.sync()
-    for id in ["t1", "t2", "t3"] { await w.things.edit(id) { $0.trashed = true } }
+    for id in ["t1", "t2", "t3", "t4"] { await w.things.edit(id) { $0.trashed = true } }   // 4 of 5: over 3 and over a quarter
     let r = try await w.sync()
     #expect(r.deletionsHeld && r.deletedInReminders == 0)
     #expect(r.log.contains { $0.level == .error })
-    #expect(await w.reminders.all(in: "L1").count == 4)
-    #expect(w.links.links.count == 4)
+    #expect(await w.reminders.all(in: "L1").count == 5)
+    #expect(w.links.links.count == 5)
     let forced = try await w.sync(force: true)
-    #expect(forced.deletedInReminders == 3 && !forced.deletionsHeld)
+    #expect(forced.deletedInReminders == 4 && !forced.deletionsHeld)
     #expect(await w.reminders.all(in: "L1").count == 1)
+}
+
+// Live test, 2026-11-10: deleting 2 of 4 items in a short list was held until Sync Now.
+@Test func threeOrFewerDeletionsInAShortListAreNeverHeldByTheFraction() async throws {
+    var w = await projectWorld()
+    for i in 1...4 { await w.things.add(todo("t\(i)", "Item \(i)", project: "P1")) }
+    try await w.sync()
+    for id in ["t1", "t2"] { await w.things.edit(id) { $0.trashed = true } }   // 2 of 4
+    let two = try await w.sync()
+    #expect(!two.deletionsHeld && two.deletedInReminders == 2 && !two.log.contains { $0.level == .error })
+    await w.things.add(todo("t5", "Item 5", project: "P1"))
+    try await w.sync()
+    for id in ["t3", "t4", "t5"] { await w.things.edit(id) { $0.trashed = true } }   // 3 of 3: the whole list
+    let three = try await w.sync()
+    #expect(!three.deletionsHeld && three.deletedInReminders == 3)
+    #expect(await w.reminders.all(in: "L1").isEmpty && w.links.links.isEmpty)
 }
 
 @Test func moreThanTenDeletionsTrips() async throws {

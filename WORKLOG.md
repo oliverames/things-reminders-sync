@@ -1,5 +1,39 @@
 # Worklog
 
+## 2026-11-10: Tags with spaces, and the deletion limit on short lists
+
+Tests: `swift test --parallel`, 436 passing (was 428). Fakes only: nothing was run against the real apps, the app
+was not launched and nothing was committed.
+
+- Defect from the live test: the Things tag "TRS Assign" was sent to Reminders as it is, Reminders stored
+  `TRSAssign`, and the read-back compared the two by lowercased title only. Every full pass logged "Reminders did
+  not take the tags", rewrote the reminder, and with `createMissingTags` on made a Things tag "TRSAssign".
+- One normalization now matches the two sides, `TagEnvironment.key` in `Engine/FieldFidelity.swift`: a leading "#"
+  dropped, all whitespace removed, lowercased. `RemCTLReminders.tagKeys` (the read-back and `privateFieldsLanded`)
+  uses it too, so the tag environment, `decideTags`, the fingerprint comparison, `settle` and `createMissingTags`
+  all agree. A reminder tag "TRSAssign" resolves to the existing "TRS Assign".
+- Writes: `decideTags` and `RemCTLReminders.update` send `TagEnvironment.reminderTags`, each tag without whitespace
+  and at most once per key. The fingerprint still stores titles as Things spells them, and a fingerprint the old
+  code saved with "TRSAssign" compares equal.
+- Several Things tags with one key ("Home Office", "HomeOffice"): a reminder tag means the one titled exactly like
+  it, otherwise the first by title. Before this change the oldest id won among titles that differed only in case.
+  Each full pass logs the group once at info level.
+- The fakes store tags the way Reminders does (whitespace removed): `FakeReminders` in `EngineFakesTests.swift` and
+  `FakeRemCTL` in `RemCTLRemindersTests.swift`. New tests: `TagWhitespaceTests` in
+  `EngineFlagsTagsSubtasksTests.swift` (the live scenario, a second and third pass that write nothing, no second
+  tag) and `aTagWithWhitespaceIsSentWithoutItAndOnlyOnce` in `RemCTLFieldFidelityTests.swift`. With the old key
+  put back, 17 expectations in these tests fail.
+- Deletion limit: the quarter rule now applies only when more than 3 deletions are pending in a list
+  (`SyncEngine.fractionExemptDeletions`); it used to apply from 2. The limit of 10 per list and per pass is
+  unchanged. `deletionSafetyLimitTripsAndForceApplies` and `theDeletionsGoThroughTheSafetyLimit` now delete 4 of 5,
+  and `threeOrFewerDeletionsInAShortListAreNeverHeldByTheFraction` covers 2 of 4 and 3 of 3. README.md and
+  docs/SPEC.md state the new rule and the tag matching.
+
+Not verified: the behavior against the real Reminders and Things. The live account still has the Things tag
+"TRSAssign" that the old code created. It now shares a key with "TRS Assign", and a reminder tag `#TRSAssign`
+means it (the exact title) until that tag is deleted or merged in Things. Whether Reminders showed the tag twice
+because of two writes or because of the space is not known; one write can no longer name a key twice.
+
 ## 2026-11-10: Reminder-only repeat edits and accessibility names in Settings
 
 Tests: `swift build` and `swift test --parallel`, 428 passing (was 425). The app was not launched, so the

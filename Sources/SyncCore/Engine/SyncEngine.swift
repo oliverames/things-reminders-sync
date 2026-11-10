@@ -45,6 +45,8 @@ public struct SyncReport: Sendable {
 public struct SyncEngine: Sendable {
     public static let maxDeletionsPerPass = 10
     public static let maxDeletionFraction = 0.25
+    /// Up to this many deletions in a list are never held by the fraction (short lists would trip it all the time).
+    public static let fractionExemptDeletions = 3
 
     let things: any ThingsBackend
     let reminders: any RemindersBackend
@@ -1350,13 +1352,14 @@ final class SyncPass {
 
     func runDeletions(linksAtStart: [LinkRecord]) async {
         // The count limit holds for the pass as a whole (three lists losing ten items each is thirty deletions) as well
-        // as per list; the fraction is per list. A single deletion in a list is never held by the fraction.
+        // as per list; the fraction is per list and only applies to more than `fractionExemptDeletions` deletions, so
+        // deleting 2 of 4 items in a short list goes through.
         let overall = pendingDeletes.values.reduce(0) { $0 + $1.count }
         for (mappingId, items) in pendingDeletes.sorted(by: { $0.key < $1.key }) {
             let total = linksAtStart.filter { $0.mappingId == mappingId }.count
             let n = items.count
             let tripped = !force && (n > SyncEngine.maxDeletionsPerPass || overall > SyncEngine.maxDeletionsPerPass
-                || (n > 1 && Double(n) > SyncEngine.maxDeletionFraction * Double(total)))
+                || (n > SyncEngine.fractionExemptDeletions && Double(n) > SyncEngine.maxDeletionFraction * Double(total)))
             let listTitle = activeById[mappingId]?.listTitle ?? mappingId
             if tripped {
                 report.deletionsHeld = true

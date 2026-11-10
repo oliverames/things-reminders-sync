@@ -352,7 +352,8 @@ day that is not a repeating template.
 
 - Before links are processed, every tag of a reminder whose tags will be written to Things (a linked reminder, or
   an open unlinked one about to get a to-do, in a list that is not one-way from Things) is checked. A tag with no
-  Things tag of that title in any case is created (`createTag`, the `Tag4` shape above), added to the tag
+  Things tag with the same tag key (see "Tags": no case, no whitespace, so `#TRSAssign` is the existing tag
+  "TRS Assign") is created (`createTag`, the `Tag4` shape above), added to the tag
   environment, and applied by the normal tag sync in the same pass.
 - Each created tag is recorded in the ownership ledger (`ownedThings`, kind `tag`, under the list of the reminder
   that needed it). The ledger cleanup removes it once no task carries it, but not while any reminder still has a
@@ -451,8 +452,14 @@ they are until one side is edited.
 and one `.info` is logged per full pass. Two-way: the side that differs from the agreed value wins (a missing agreed value reads
 as unflagged, so an upgrade unites flags and removes none). Written with `update --private flagged`.
 
-**Tags.** Only titles that already exist in Things (matched without case, because Reminders treats tags that differ only in case
-as one; this app never creates a tag for a reminder's tag unless `createMissingTags` is on; titles with a comma are skipped
+**Tags.** Reminders tags are hashtags: they hold no whitespace (the Things tag "TRS Assign" is stored as `TRSAssign`) and tags
+that differ only in case are one tag. So the two sides are matched by one tag key, `TagEnvironment.key`: a leading "#" dropped,
+all whitespace removed, lowercased. The key decides which Things tag a reminder tag means, whether a reminder already carries a
+to-do's tag, the read-back check after a private tag write (`RemCTLReminders.tagKeys`), the comparison with the fingerprint (which
+stores the titles as Things spells them) and the `createMissingTags` lookup. A Things tag is written to Reminders without its
+whitespace (`TagEnvironment.reminderForm`), and one write never names the same key twice. When several Things tags share a key
+("Home Office" and "HomeOffice"), a reminder tag means the one titled exactly like it if there is one, otherwise the first by
+title; each full pass logs the group once. Only titles that already exist in Things sync ( this app never creates a tag for a reminder's tag unless `createMissingTags` is on; titles with a comma are skipped
 because `set_tags` takes one comma-separated string), minus the flagged tag, the priority tag, each list's `alwaysTag` and every tag a tag-mode list owns. Set merge against the
 agreed titles: a title added on a side is added to the other, a title removed from a side is removed from the other, and a
 conflict cannot arise. A Reminders tag with no Things counterpart is preserved and never removed. Reminders is written with
@@ -621,7 +628,7 @@ the link and leave both items alone. Never delete anything that was not linked.
 
 Safety limits: if one pass would delete or trash more than 10 items (in one mapping, or over all mappings
 together) or more than 25% of a mapping's links, skip those deletions, log an `.error`, and set phase to
-`.error` until the user runs Sync Now. The 25% rule never holds a single deletion in a mapping. Never empty the Things Trash. Never touch Reminders lists that are not mapped.
+`.error` until the user runs Sync Now. The 25% rule applies only when more than 3 deletions are pending in a mapping (`fractionExemptDeletions`); 3 or fewer always go through, so 2 of 4 items in a short list are never held. The absolute limit of 10 is unchanged. Never empty the Things Trash. Never touch Reminders lists that are not mapped.
 
 ## Ownership ledger and cleanup
 

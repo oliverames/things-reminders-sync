@@ -436,15 +436,15 @@ struct CanceledBecomesTests {
 
     @Test func theDeletionsGoThroughTheSafetyLimit() async throws {
         var w = await world { $0.canceledBecomes = .deleted }
-        for i in 1...4 { await w.reminders.add(reminder("r\(i)", "L1", "Item \(i)")) }
+        for i in 1...5 { await w.reminders.add(reminder("r\(i)", "L1", "Item \(i)")) }
         try await w.sync()
-        for link in w.links.links.prefix(3) { await cancel(w, link.thingsId) }
+        for link in w.links.links.prefix(4) { await cancel(w, link.thingsId) }   // 4 of 5: over 3 and over a quarter
         let held = try await w.sync()
         #expect(held.deletionsHeld && held.deletedInReminders == 0)
-        #expect(await w.reminders.deletes.isEmpty && w.links.links.count == 4)
+        #expect(await w.reminders.deletes.isEmpty && w.links.links.count == 5)
         #expect(await w.reminders.all(in: "L1").allSatisfy { !$0.completed }, "held, not completed instead")
         let forced = try await w.sync(.full, force: true)
-        #expect(forced.deletedInReminders == 3 && w.links.links.count == 1)
+        #expect(forced.deletedInReminders == 4 && w.links.links.count == 1)
     }
 
     @Test func withoutPropagatedDeletesOrOneWayFromRemindersTheReminderIsNotDeleted() async throws {

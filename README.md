@@ -86,7 +86,7 @@ You can change a list's mode or target later. The app moves the items it linked 
 | Repeat rule | Repeat rule | Daily, weekly, monthly and yearly rules, including nth weekdays, the last day of the month, and end conditions. |
 | Flag | Your **Important** tag | Choose the tag in Settings, on the Options tab (`flaggedTagTitle` in `config.json`). |
 | Priority high | A tag you choose | Off until you set `priorityTag` in `config.json`. See "More options" below. |
-| Tags | Tags with the same name | Only tags that already exist in Things, matched without regard to case. The app never creates a tag for this unless you turn on `createMissingTags`. The only tag it ever creates is the target of a tag-mode list you save as "New…". |
+| Tags | Tags with the same name | Only tags that already exist in Things, matched without regard to case or spaces. Reminders tags can't contain spaces, so the Things tag "Home Office" is `#HomeOffice` in Reminders. The app never creates a tag for this unless you turn on `createMissingTags`. The only tag it ever creates is the target of a tag-mode list you save as "New…". |
 | Subtasks | Checklist items | Both ways: adding, renaming, completing or removing one changes the other. Set `syncChecklists` to `false` in `config.json` to stop writing checklists in Things. |
 | Section | Heading | In project mode. |
 
@@ -111,7 +111,7 @@ Some rules only one app can express. Reminders has no "repeat after completion,"
 ## How it stays safe
 
 - **Validated writes.** Every Things change is checked before it's sent. Ids have to decode to exactly 16 bytes, dates have to be real calendar days, references have to point at live items, and repeat rules have to match a shape on file in [docs/RECURRENCE.md](docs/RECURRENCE.md). A change that fails isn't sent.
-- **A deletion limit.** If one pass would delete more than 10 items in all, or more than a quarter of one list's links, it holds those deletions and waits for you to choose **Sync Now** from the menu. One deletion in a list is never held by the quarter rule.
+- **A deletion limit.** If one pass would delete more than 10 items in all, or more than a quarter of one list's links, it holds those deletions and waits for you to choose **Sync Now** from the menu. The quarter rule only applies when more than 3 deletions are pending in a list, so deleting 2 of 4 items in a short list goes straight through.
 - **A failed read is never a deletion.** If the app can't read Reminders or Things, or can't tell which of two lists with the same name a reminder is in, the pass stops and nothing is changed. Two lists may share a name; the app tells them apart by id.
 - **No blind retries.** A write to Reminders that gets no answer is never sent again. The app reads the reminder back to see whether the write landed. An item whose partner already exists is linked by title instead of being copied a second time.
 - **Trash, never purge.** Deleted Things to-dos, projects and headings go to the Trash, and the app never empties it. The one exception is an area or tag the app created itself: Things has no Trash for those, so the app deletes one once nothing uses it, counting what is in the Trash as use.

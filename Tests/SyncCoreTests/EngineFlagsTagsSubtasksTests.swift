@@ -190,6 +190,114 @@ private func pair(_ w: inout World, notes: String = "", tags: [String] = [], che
     }
 }
 
+// Reminders tags are hashtags and hold no whitespace: the Things tag "TRS Assign" is "#TRSAssign" there. Both sides
+// are matched by `TagEnvironment.key` (no leading "#", no whitespace, no case).
+@Suite struct TagWhitespaceTests {
+    private func warnings(_ r: SyncReport) -> [String] { r.log.filter { $0.level == .warning || $0.level == .error }.map(\.message) }
+    private func tagWrites(_ w: World) async -> [[String]] { await w.reminders.patches.compactMap(\.patch.tags) }
+
+    @Test func oneNormalizationForBothSides() {
+        #expect(TagEnvironment.key("TRS Assign") == "trsassign" && TagEnvironment.key("#TRSAssign") == "trsassign")
+        #expect(TagEnvironment.key(" Home\tOffice\u{00A0}2 ") == "homeoffice2")
+        #expect(TagEnvironment.reminderForm("TRS Assign") == "TRSAssign" && TagEnvironment.reminderForm("#Errands") == "Errands")
+        #expect(TagEnvironment.reminderTags(["TRS Assign", "trsassign", "#TRSAssign", " ", "Home"]) == ["TRSAssign", "Home"])
+        #expect(RemCTLReminders.tagKeys(["TRS Assign"]) == RemCTLReminders.tagKeys(["TRSAssign"]))
+    }
+
+    // The live scenario of 2026-11-10: a to-do tagged "TRS Assign" with `createMissingTags` on.
+    @Test func aThingsTagWithASpaceSyncsOnceAndNeverMakesASecondTag() async throws {
+        var w = await world(tags: [("G1", "Important"), ("G2", "TRS Assign")])
+        w.config.createMissingTags = true
+        await w.things.add(todo("t1", "Task", project: "P1", tags: ["G2"]))
+        let first = try await w.sync()
+        let rid = w.links.links[0].reminderId
+        #expect(await tagWrites(w) == [["TRSAssign"]], "sent once, in the form Reminders stores")
+        #expect(await w.reminders.item(rid)?.tags == ["TRSAssign"])
+        #expect(warnings(first).isEmpty, "no \"Reminders did not take the tags\"")
+        #expect(w.links.links[0].fingerprint.tags == ["TRS Assign"])
+        for _ in 1...2 {
+            let again = try await w.sync()
+            #expect(again.changeCount == 0 && warnings(again).isEmpty)
+        }
+        #expect(await tagWrites(w).count == 1, "the reminder is not rewritten")
+        #expect(await w.things.tags.count == 2 && w.links.ownedThings.isEmpty, "no Things tag \"TRSAssign\" was created")
+        #expect(await w.things.task("t1")?.tagIds == ["G2"])
+    }
+
+    @Test func aReminderTagResolvesToTheThingsTagWithASpace() async throws {
+        var w = await world(tags: [("G1", "Important"), ("G2", "TRS Assign")])
+        w.config.createMissingTags = true
+        let (tid, rid) = try await pair(&w)
+        await w.reminders.edit(rid) { $0.tags = ["trsassign"]; $0.lastModified = late }
+        let report = try await w.sync()
+        #expect(await w.things.task(tid)?.tagIds == ["G2"])
+        #expect(await w.things.tags.count == 2 && w.links.ownedThings.isEmpty)
+        #expect(await w.reminders.item(rid)?.tags == ["trsassign"], "the reminder keeps its spelling")
+        #expect(await tagWrites(w).isEmpty)
+        #expect(warnings(report).isEmpty)
+        #expect(try await w.sync().changeCount == 0)
+        // A new reminder with the tag gets a to-do with the same Things tag.
+        var r = reminder("r9", "L1", "New"); r.tags = ["TRSAssign"]
+        await w.reminders.add(r)
+        try await w.sync()
+        #expect(await w.things.created.last?.tagIds == ["G2"])
+        #expect(await w.things.tags.count == 2)
+        #expect(try await w.sync().changeCount == 0)
+    }
+
+    @Test func aReminderThatAlreadyCarriesTheTagIsNotWritten() async throws {
+        var w = await world(tags: [("G1", "Important"), ("G2", "TRS Assign"), ("G3", "Work")])
+        let (tid, rid) = try await pair(&w, tags: ["G2"])
+        // A fingerprint saved by the old code names the tag as Reminders spelled it.
+        w.links.links[0].fingerprint.tags = ["TRSAssign"]
+        #expect(try await w.sync().changeCount == 0)
+        #expect(await tagWrites(w).count == 1)
+        // Things gains Work: the one write keeps the tag the reminder has and adds the new one.
+        await w.things.edit(tid) { $0.tagIds += ["G3"]; $0.modificationDate = late }
+        try await w.sync()
+        #expect(await tagWrites(w).last == ["TRSAssign", "Work"])
+        // Things drops "TRS Assign": the reminder loses "TRSAssign".
+        await w.things.edit(tid) { $0.tagIds = ["G3"]; $0.modificationDate = late }
+        try await w.sync()
+        #expect(await w.reminders.item(rid)?.tags == ["Work"])
+        #expect(try await w.sync().changeCount == 0)
+    }
+
+    @Test func twoThingsTagsThatAreOneInRemindersAreSentOnceAndLoggedOnce() async throws {
+        var w = await world(tags: [("G1", "Important"), ("G2", "HomeOffice"), ("G3", "Home Office")])
+        await w.things.add(todo("t1", "Task", project: "P1", tags: ["G2", "G3"]))
+        let first = try await w.sync()
+        let rid = w.links.links[0].reminderId
+        #expect(await tagWrites(w) == [["HomeOffice"]])
+        #expect(await w.reminders.item(rid)?.tags == ["HomeOffice"])
+        #expect(first.log.filter { $0.message.contains("are the same tag in Reminders") }.count == 1)
+        #expect(warnings(first).isEmpty)
+        let again = try await w.sync()
+        #expect(again.changeCount == 0 && warnings(again).isEmpty)
+        #expect(await tagWrites(w).count == 1)
+        #expect(await w.things.task("t1")?.tagIds == ["G2", "G3"])
+    }
+
+    @Test func aReminderTagMeansTheExactTitleOtherwiseTheFirstByTitle() async throws {
+        // An exact title wins, although "Home Office" sorts first.
+        var w = await world(tags: [("G1", "Important"), ("G2", "HomeOffice"), ("G3", "Home Office")])
+        var (tid, rid) = try await pair(&w)
+        await w.reminders.edit(rid) { $0.tags = ["HomeOffice"]; $0.lastModified = late }
+        try await w.sync()
+        #expect(await w.things.task(tid)?.tagIds == ["G2"])
+        #expect(try await w.sync().changeCount == 0)
+        // No exact title: the first by title ("Home Office" before "home office"), not the oldest id.
+        w = await world(tags: [("G1", "Important"), ("G2", "home office"), ("G3", "Home Office")])
+        (tid, rid) = try await pair(&w)
+        await w.reminders.edit(rid) { $0.tags = ["HomeOffice"]; $0.lastModified = late }
+        try await w.sync()
+        #expect(await w.things.task(tid)?.tagIds == ["G3"])
+        #expect(await w.reminders.item(rid)?.tags == ["HomeOffice"])
+        #expect(await tagWrites(w).isEmpty)
+        #expect(try await w.sync().changeCount == 0)
+    }
+}
+
 private func item(_ id: String, _ title: String, done: Bool = false, ix: Double = 0) -> ThingsChecklistItem {
     ThingsChecklistItem(id: id, title: title, completed: done, index: ix)
 }

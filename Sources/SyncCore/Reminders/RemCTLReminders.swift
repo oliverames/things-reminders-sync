@@ -256,7 +256,9 @@ public actor RemCTLReminders: RemindersBackend {
         if let tags = patch.tags {
             // `set_tags` replaces every tag and takes ONE comma-separated string; `clear_tags` removes them all.
             if tags.contains(where: { $0.contains(",") }) { throw RemCTLError.tool("RemCTL cannot write a tag whose name contains a comma") }
-            if tags.isEmpty { privateFields["clear_tags"] = true } else { privateFields["set_tags"] = .string(tags.joined(separator: ",")) }
+            // Reminders tags hold no whitespace, so each goes out in the form it will be stored in, and once.
+            let sent = TagEnvironment.reminderTags(tags)
+            if sent.isEmpty { privateFields["clear_tags"] = true } else { privateFields["set_tags"] = .string(sent.joined(separator: ",")) }
         }
         if let subtasks = patch.addSubtasks, !subtasks.isEmpty { privateFields["subtasks"] = .array(subtasks.map { .string($0) }) }
         // Assignment in a shared list (`--assign` / `--unassign`). No read shows it, so nothing is read back.
@@ -338,8 +340,9 @@ public actor RemCTLReminders: RemindersBackend {
         return true
     }
 
-    /// Reminders treats tags that differ only in case as one tag, so they compare without case.
-    static func tagKeys(_ tags: [String]) -> Set<String> { Set(tags.map { $0.lowercased() }) }
+    /// Reminders stores a tag without whitespace and treats tags that differ only in case as one tag, so what was
+    /// sent and what reads back compare by `TagEnvironment.key`.
+    static func tagKeys(_ tags: [String]) -> Set<String> { Set(tags.map(TagEnvironment.key).filter { !$0.isEmpty }) }
 
     static func privateFieldsLanded(_ patch: ReminderPatch, in item: ReminderItem) -> Bool {
         if let tags = patch.tags, tagKeys(tags) != tagKeys(item.tags) { return false }

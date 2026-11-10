@@ -80,13 +80,41 @@ struct TagEnvironment {
     var flaggedId: String?
     /// The existing tag `SyncConfig.priorityTag` names; nil when priority is not synced.
     var priorityId: String?
-    /// Mappable tag title, lowercased -> Things tag id (the oldest id when several share a title). Titles match
-    /// without case because Reminders treats `#errands` and `#Errands` as one tag.
+    /// Mappable tag key (see `key`) -> Things tag id. When several Things tags share a key, the first by title
+    /// (the oldest id among equal titles).
     var idByKey: [String: String] = [:]
     /// The same key -> the title as Things spells it.
     var titleByKey: [String: String] = [:]
+    /// Mappable tag title exactly as Things spells it -> its id. Only read when several tags share a key.
+    var idByTitle: [String: String] = [:]
 
-    static func key(_ title: String) -> String { title.lowercased() }
+    /// The one normalization for matching a Things tag title with a Reminders tag: a leading "#" dropped, all
+    /// whitespace removed, lowercased. Reminders tags are hashtags: they hold no whitespace ("TRS Assign" is stored
+    /// as "TRSAssign") and `#errands` and `#Errands` are one tag.
+    static func key(_ title: String) -> String { reminderForm(title).lowercased() }
+
+    /// A tag title as Reminders stores it: no leading "#", no whitespace, case kept.
+    static func reminderForm(_ title: String) -> String {
+        var scalars = title.unicodeScalars.filter { !$0.properties.isWhitespace }[...]
+        while scalars.first == "#" { scalars = scalars.dropFirst() }
+        return String(String.UnicodeScalarView(scalars))
+    }
+
+    /// Tags ready for one Reminders write: each in `reminderForm`, empty ones dropped, one per key (the first wins).
+    static func reminderTags(_ titles: [String]) -> [String] {
+        var seen = Set<String>(), out: [String] = []
+        for form in titles.map(reminderForm) where !form.isEmpty && seen.insert(form.lowercased()).inserted { out.append(form) }
+        return out
+    }
+
+    /// The Things tag a reminder's tag with this key means: the one titled exactly like one of the reminder's own
+    /// spellings of it when several Things tags share the key, otherwise the key's tag.
+    func id(forKey key: String, reminderTags: [String]) -> String? {
+        for name in reminderTags where TagEnvironment.key(name) == key {
+            if let id = idByTitle[TagEnvironment.reminderForm(name)] ?? idByTitle[name] { return id }
+        }
+        return idByKey[key]
+    }
 }
 
 func checklistKey(_ title: String) -> String { Fingerprint.normalize(title).lowercased() }
@@ -126,9 +154,18 @@ extension SyncPass {
             if m.direction != .thingsToReminders { alwaysTagIds[m.id] = tag.id }
         }
         // RemCTL's `set_tags` takes one comma-separated string, so a title with a comma cannot be written to Reminders.
-        for tag in sorted where !excluded.contains(tag.id) && !tag.title.isEmpty && !tag.title.contains(",") {
+        var shared: [String: [String]] = [:]
+        for tag in sorted.sorted(by: { ($0.title, $0.id) < ($1.title, $1.id) })
+        where !excluded.contains(tag.id) && !tag.title.contains(",") {
             let key = TagEnvironment.key(tag.title)
+            guard !key.isEmpty else { continue }
+            if env.idByTitle[tag.title] == nil { env.idByTitle[tag.title] = tag.id; shared[key, default: []].append(tag.title) }
             if env.idByKey[key] == nil { env.idByKey[key] = tag.id; env.titleByKey[key] = tag.title }
+        }
+        // Reminders cannot tell such tags apart, so each full pass says once which one its tag means.
+        for (_, titles) in shared.sorted(by: { $0.key < $1.key }) where titles.count > 1 && isFull {
+            let names = titles.map { "\"\($0)\"" }.joined(separator: ", ")
+            log(.info, "The Things tags \(names) are the same tag in Reminders (tags there have no spaces and ignore case). A reminder tag means the one with exactly its title, otherwise \"\(titles[0])\"")
         }
         tagEnv = env
         if isFull, env.flaggedId == nil {
@@ -137,7 +174,7 @@ extension SyncPass {
     }
 
     /// `createMissingTags`: makes a Things tag for every tag of a syncing reminder that Things has no tag for (no tag
-    /// of that title in any spelling of case). Never for a title one of the `alwaysTag`, `flaggedTagTitle` or
+    /// with the same `TagEnvironment.key`, so "TRSAssign" never makes a second tag beside "TRS Assign"). Never for a title one of the `alwaysTag`, `flaggedTagTitle` or
     /// `priorityTag` settings names: those tags must exist. The tag is recorded in the ownership ledger as created by
     /// this app, and the tag sync that follows in this pass puts it on the to-do.
     func createMissingTags() async {
@@ -158,7 +195,7 @@ extension SyncPass {
             else { continue }
             guard let m = activeById[mappingId], m.direction != .thingsToReminders else { continue }
             for name in r.tags {
-                let title = Fingerprint.normalize(name), k = key(title)
+                let title = TagEnvironment.reminderForm(Fingerprint.normalize(name)), k = key(title)
                 // A title with a comma cannot be written back to Reminders, so it never syncs.
                 guard !title.isEmpty, !title.contains(","), !taken.contains(k), wanted[k] == nil else { continue }
                 wanted[k] = (title, m.id)
@@ -168,7 +205,7 @@ extension SyncPass {
             do {
                 let id = try await things.createTag(title: tag.title, parentId: nil)
                 snapshot.tags[id] = ThingsTag(id: id, title: tag.title)
-                tagEnv.idByKey[k] = id; tagEnv.titleByKey[k] = tag.title
+                tagEnv.idByKey[k] = id; tagEnv.titleByKey[k] = tag.title; tagEnv.idByTitle[tag.title] = id
                 store.ownedThings.append(OwnedThingsContainer(id: id, kind: .tag, mappingId: tag.mappingId, title: tag.title))
                 log(.change, "Created the Things tag \"\(tag.title)\" for a reminder tag")
             } catch {
@@ -323,7 +360,8 @@ extension SyncPass {
     // MARK: Tags
 
     func decideTags(base: Fingerprint?, reminder r: ReminderItem, task t: ThingsTask, source: Side? = nil) -> TagOutcome {
-        // Everything compares by lowercased title: a reminder's `#errands` and the Things tag "Errands" are the same tag.
+        // Everything compares by `TagEnvironment.key`: a reminder's `#errands` and the Things tag "Errands" are the
+        // same tag, and so are `#TRSAssign` and "TRS Assign".
         let key = TagEnvironment.key
         let mappable = Set(tagEnv.idByKey.keys)
         let rset = Set(r.tags.map(key)).intersection(mappable)
@@ -336,23 +374,24 @@ extension SyncPass {
             let adds = sset.subtracting(b).subtracting(vset), removes = b.subtracting(sset).intersection(vset)
             var out = TagOutcome(fp: sset.compactMap { tagEnv.titleByKey[$0] }.sorted())
             if source == .reminders {
-                out.thingsAdd = adds.sorted().compactMap { tagEnv.idByKey[$0] }
+                out.thingsAdd = adds.sorted().compactMap { tagEnv.id(forKey: $0, reminderTags: r.tags) }
                 out.thingsRemove = t.tagIds.filter { id in snapshot.tags[id].map { removes.contains(key($0.title)) } ?? false }
             } else if !adds.isEmpty || !removes.isEmpty {
-                out.reminderTags = r.tags.filter { !removes.contains(key($0)) } + adds.sorted().compactMap { tagEnv.titleByKey[$0] }
+                out.reminderTags = TagEnvironment.reminderTags(r.tags.filter { !removes.contains(key($0)) } + adds.sorted().compactMap { tagEnv.titleByKey[$0] })
             }
             return out
         }
         let final = b.subtracting(b.subtracting(rset)).subtracting(b.subtracting(tset)).union(rset.subtracting(b)).union(tset.subtracting(b))
         var out = TagOutcome(fp: final.compactMap { tagEnv.titleByKey[$0] }.sorted())
         // Things: carry the tags with those titles; removal covers every tag of the to-do with a removed title.
-        out.thingsAdd = final.subtracting(tset).sorted().compactMap { tagEnv.idByKey[$0] }
+        out.thingsAdd = final.subtracting(tset).sorted().compactMap { tagEnv.id(forKey: $0, reminderTags: r.tags) }
         let removeKeys = tset.subtracting(final)
         out.thingsRemove = t.tagIds.filter { id in snapshot.tags[id].map { removeKeys.contains(key($0.title)) } ?? false }
         // Reminders: every tag without a Things counterpart is kept as it is, and a tag it already has keeps its spelling.
         let kept = r.tags.filter { !mappable.contains(key($0)) || final.contains(key($0)) }
         let added = final.subtracting(rset).sorted().compactMap { tagEnv.titleByKey[$0] }
-        if !added.isEmpty || kept.count != r.tags.count { out.reminderTags = kept + added }
+        // What is sent is in the form Reminders stores (no whitespace), one tag per key.
+        if !added.isEmpty || kept.count != r.tags.count { out.reminderTags = TagEnvironment.reminderTags(kept + added) }
         return out
     }
 
@@ -591,7 +630,9 @@ extension SyncPass {
         var titles: [String] = []
         for name in r.tags {
             let key = TagEnvironment.key(name)
-            if let id = tagEnv.idByKey[key], !tagIds.contains(id) { tagIds.append(id); titles.append(tagEnv.titleByKey[key] ?? name) }
+            if let id = tagEnv.id(forKey: key, reminderTags: [name]), !tagIds.contains(id), !titles.contains(tagEnv.titleByKey[key] ?? name) {
+                tagIds.append(id); titles.append(tagEnv.titleByKey[key] ?? name)
+            }
         }
         var flagged: Bool?
         if let fid = tagEnv.flaggedId { flagged = r.flagged; if r.flagged, !tagIds.contains(fid) { tagIds.append(fid) } }

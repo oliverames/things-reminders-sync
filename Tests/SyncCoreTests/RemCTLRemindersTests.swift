@@ -104,7 +104,7 @@ actor FakeRemCTL: RemCTLTransport {
             if arguments["private"] == true {
                 if let u = arguments["url"] { edit(id, "url", u) }
                 if let f = arguments["flagged"] { edit(id, "flagged", f) }
-                if let tags = arguments["set_tags"]?.string { edit(id, "tags", .array(tags.split(separator: ",").map { .string(String($0)) })) }
+                if let tags = arguments["set_tags"]?.string { edit(id, "tags", .array(tags.split(separator: ",").map { .string(String($0.filter { !$0.isWhitespace })) })) }   // Reminders stores a tag without whitespace
                 if arguments["clear_tags"] == true { edit(id, "tags", []) }
                 for title in arguments["subtasks"]?.array?.compactMap(\.string) ?? [] {
                     nextId += 1

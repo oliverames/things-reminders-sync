@@ -47,6 +47,18 @@ import Testing
 }
 
 @Suite struct RemCTLFieldWritingTests {
+    // Reminders stores "TRS Assign" as "TRSAssign": the tag goes out in that form, once, and the read-back agrees.
+    @Test func aTagWithWhitespaceIsSentWithoutItAndOnlyOnce() async throws {
+        let fake = FakeRemCTL()
+        await fake.put(FakeRemCTL.row(5, "X"))
+        let patch = ReminderPatch(tags: ["TRS Assign", "TRSAssign", "#trs assign", "Home"])
+        let item = try await makeBackend(fake).update(id: "5", patch: patch)
+        #expect(try #require(await fake.calls("update_reminder").first)["set_tags"] == "TRSAssign,Home")
+        #expect(item.tags == ["TRSAssign", "Home"])
+        #expect(RemCTLReminders.privateFieldsLanded(ReminderPatch(tags: ["TRS Assign", "Home"]), in: item))
+        #expect(!RemCTLReminders.privateFieldsLanded(ReminderPatch(tags: ["TRS Assign", "Work"]), in: item))
+    }
+
     @Test func linkFlagTagsAndSubtasksAreSentPrivately() async throws {
         let fake = FakeRemCTL()
         await fake.put(FakeRemCTL.row(5, "X"))
