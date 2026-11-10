@@ -1,5 +1,23 @@
 # Worklog
 
+## 2026-11-10 - Session closeout: 0.1.1 to 0.2.3 shipped
+
+**What changed**: Two days of audit, fixes and options work are released as v0.2.3 (head `01e969f` before this entry) and running on home-server with nine list mappings, every option at its default. The entries below record each change. Related repos: `things3-mcp-connector` (Worker `a295a3e1`) and the things-3 skill in `personal-plugins` (`workflows` 3.3.2).
+
+**Decisions made**: Write only shapes sampled from Things 3.24.2 (recorded in `docs/SPEC.md` and `docs/RECURRENCE.md`). Every new option defaults to earlier behavior. Assignee tags are Things to Reminders only, because RemCTL cannot read an assignee. Three or fewer deletions on a list are never held.
+
+**Verification**: 443 tests pass and CI is green. Live on throwaway lists with Things open: This Evening, due as deadline both ways, canceled deletes the reminder, Someday exclusion, sections as projects, missing tag creation, priority tag, assignee tag, one-way direction, pause, tags with spaces, held deletions with Apply Deletions. `trs-admin dry-run` on live data planned zero writes before each deploy.
+
+**Left off at**: Nothing in progress. All test lists, projects, areas and tags were removed on both sides.
+
+**Open questions**:
+- NEW: the lower part of the Options sheet, the held-deletions notice on a list row and VoiceOver names are unconfirmed (issue #2).
+- NEW: which password escaping Things Cloud wants for special characters (things3-mcp-connector issue #4).
+- Deferred by Oliver: GitHub issue sync into Things projects or areas, tracked as a reminder in "For Claude".
+- Resolved this session: issue #1 (Things generates occurrences from `Task6` templates).
+
+---
+
 ## 2026-11-10: Dry run reads sections, held deletions in the menu
 
 Tests: `swift build` clean, `swift test --parallel`, 443 passing (was 436). Fakes only: nothing was run against the
