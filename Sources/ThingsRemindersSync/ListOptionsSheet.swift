@@ -70,6 +70,11 @@ struct ListOptionsSheet: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            Text("Options for \(listTitle)")
+                .font(.headline)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 30).padding(.top, 16).padding(.bottom, 4)
+                .accessibilityAddTraits(.isHeader)
             Form {
                 direction
                 dates
