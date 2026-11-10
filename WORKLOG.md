@@ -1,6 +1,12 @@
 # Worklog
 
-## 2026-11-09: audit fixes (uncommitted when written)
+## 2026-11-09: checklist writes on by default
+
+Completing, renaming and removing a checklist item in the Things 3.24.2 Mac app was read back from history index 1644
+(shapes in `docs/SPEC.md`). They match what the client writes, so `syncChecklists` now defaults to on and subtasks sync
+both ways. Reopening a completed item is still unsampled.
+
+## 2026-11-09: audit fixes (commit `1496abe`)
 
 Fixes for the code audit and the write-parity audit against the JavaScript connector. Tests: `swift test --parallel`.
 Each fix has a test in `Tests/SyncCoreTests/AuditFixTests.swift` or `RemCTLRemindersTests.swift`.

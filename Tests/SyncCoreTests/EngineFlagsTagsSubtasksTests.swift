@@ -299,7 +299,7 @@ private func item(_ id: String, _ title: String, done: Bool = false, ix: Double 
 
     @Test func oldConfigAndFingerprintFilesDecode() throws {
         let config = try JSONDecoder().decode(SyncConfig.self, from: Data(#"{"mappings":[],"pollSeconds":15}"#.utf8))
-        #expect(config.flaggedTagTitle == "Important" && config.syncChecklists == false)
+        #expect(config.flaggedTagTitle == "Important" && config.syncChecklists == true)
         let fp = try JSONDecoder().decode(Fingerprint.self, from: Data(#"{"title":"a","notes":"n","completed":false}"#.utf8))
         #expect(fp.remindersNotes == nil && fp.url == nil && fp.flagged == nil && fp.tags == nil && fp.checklist == nil)
         let full = Fingerprint(title: "a", notes: "n", due: nil, completed: false, completionDay: nil, remindersNotes: "m", url: "https://x.example/",

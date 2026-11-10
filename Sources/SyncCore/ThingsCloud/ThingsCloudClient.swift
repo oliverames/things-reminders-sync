@@ -205,8 +205,8 @@ public actor ThingsCloudClient: ThingsBackend {
     }
 
     /// The commit entries for checklist changes of a to-do. Ids of items to rename, complete or delete must exist.
-    /// TODO(orchestrator): only the create shape is sampled from Things 3.24.2; completion (`ss` 3 + `sp`), rename and delete
-    /// (`t` 2) follow the to-do conventions and are unverified, so the engine gates every call on `SyncConfig.syncChecklists`.
+    /// Create, complete (`ss` 3 + `sp` + `md`), rename (`tt` + `md`) and delete (`t` 2, empty `p`) match what Things 3.24.2
+    /// wrote when sampled (docs/SPEC.md). Reopening (`ss` 0, `sp` null) mirrors the create shape and is unsampled.
     private func checklistWrites(taskId: String, _ changes: [ThingsChecklistChange], existing: [ThingsChecklistItem]) throws -> ThingsChangeMap {
         var map: ThingsChangeMap = [:]
         var next = (existing.map(\.index).max() ?? -1) + 1

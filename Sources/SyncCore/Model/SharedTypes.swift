@@ -497,15 +497,14 @@ public struct SyncConfig: Codable, Hashable, Sendable {
     /// Title of the existing Things tag a flagged reminder carries (two-way). When no tag has this title the flag is
     /// not synced (nothing is created).
     public var flaggedTagTitle: String
-    /// Writes Reminders subtasks to Things checklists (create, complete, delete). Off until the completion and
-    /// deletion shapes of `ChecklistItem3` have been sampled from the Things app (docs/SPEC.md); Things checklists still
-    /// sync to Reminders subtasks.
+    /// Writes Reminders subtasks to Things checklists (create, rename, complete, delete), using the `ChecklistItem3`
+    /// shapes sampled from the Things app (docs/SPEC.md). When off, Things checklists still sync to Reminders subtasks.
     public var syncChecklists: Bool
 
     public init(mappings: [ListMapping] = [], pollSeconds: Int = 15, reconcileMinutes: Int = 10,
                 includeCompletedOnFirstLink: Bool = false, propagateDeletes: Bool = true,
                 remindersPollSeconds: Int = 10, remctlPath: String? = nil,
-                flaggedTagTitle: String = "Important", syncChecklists: Bool = false) {
+                flaggedTagTitle: String = "Important", syncChecklists: Bool = true) {
         self.flaggedTagTitle = flaggedTagTitle; self.syncChecklists = syncChecklists
         self.mappings = mappings; self.pollSeconds = pollSeconds; self.reconcileMinutes = reconcileMinutes
         self.includeCompletedOnFirstLink = includeCompletedOnFirstLink; self.propagateDeletes = propagateDeletes
@@ -523,7 +522,7 @@ public struct SyncConfig: Codable, Hashable, Sendable {
         remindersPollSeconds = try c.decodeIfPresent(Int.self, forKey: .remindersPollSeconds) ?? 10
         remctlPath = try c.decodeIfPresent(String.self, forKey: .remctlPath)
         flaggedTagTitle = try c.decodeIfPresent(String.self, forKey: .flaggedTagTitle) ?? "Important"
-        syncChecklists = try c.decodeIfPresent(Bool.self, forKey: .syncChecklists) ?? false
+        syncChecklists = try c.decodeIfPresent(Bool.self, forKey: .syncChecklists) ?? true
     }
 }
 

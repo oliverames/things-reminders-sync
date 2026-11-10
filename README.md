@@ -86,7 +86,7 @@ You can change a list's mode or target later. The app moves the items it linked 
 | Repeat rule | Repeat rule | Daily, weekly, monthly and yearly rules, including nth weekdays, the last day of the month, and end conditions. |
 | Flag | Your **Important** tag | The tag name is `flaggedTagTitle` in `config.json`. Settings has no control for it yet. |
 | Tags | Tags with the same name | Only tags that already exist in Things, matched without regard to case. The app never creates a tag for this. The only tag it ever creates is the target of a tag-mode list you save as "New…". |
-| Subtasks | Checklist items | Things to Reminders is on. Reminders to Things stays off until every checklist write is verified against the Things app. |
+| Subtasks | Checklist items | Both ways: adding, renaming, completing or removing one changes the other. Set `syncChecklists` to `false` in `config.json` to stop writing checklists in Things. |
 | Section | Heading | In project mode. |
 
 Fields that only one app has stay put and are never cleared. That covers priority, urgent, early reminders, location alarms, images and assignees in Reminders, and deadlines and This Evening in Things. Every update carries only the fields that changed. A due date change leaves a reminder's other alerts alone, and a new time on the same day leaves a to-do in This Evening. Moving a to-do to another day takes it out of This Evening, because This Evening belongs to today.

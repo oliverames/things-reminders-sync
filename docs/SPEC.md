@@ -235,16 +235,19 @@ conflict cannot arise. A Reminders tag with no Things counterpart is preserved a
 (`ss` 3, canceled counts as done). Added on a side: added on the other; agreed before and now missing on a side: removed on the
 other; completion differs: the side that changed wins, first sight completed wins. Things to Reminders (add with `--private --subtasks`,
 complete or delete by the subtask's own id) is always on. Reminders to Things checklist writes (create, complete, delete; rename
-exists in the client) are behind the config flag `syncChecklists` (default off): until the completion and deletion shapes have been
-sampled from the app, the engine writes no checklist item. Checklist items are read from history whatever the flag says. After
+exists in the client) follow the config flag `syncChecklists` (default on since the shapes below were sampled; off means the
+engine writes no checklist item). Checklist items are read from history whatever the flag says. After
 Reminders subtask writes the reminder is re-read and any item that did not take keeps its old fingerprint entry (a failed add never
 turns into a delete in Things). A subtask added from Things is created open, and completed on the next pass.
 
 `ChecklistItem3` as Things 3.24.2 wrote it (three items added with the `things:///add` URL scheme,
 read back from history): `{"tt":"Alpha","ss":0,"sp":null,"ix":-518,"ts":["<task id>"],"lt":false,
 "cd":<now>,"md":<now>,"xx":{"_t":"oo","sn":{}}}`. Items sort by `ix` ascending (the app used -518,
--310, 0 for Alpha, Beta, Gamma). The client writes the same keys (new items get `ix` after the last existing one); completion
-is `ss` 3 with `sp`, and removal a `t` 2 tombstone, both still to be sampled from the app before `syncChecklists` is enabled. The validator
+-310, 0 for Alpha, Beta, Gamma). The client writes the same keys (new items get `ix` after the last existing one). Edits made in
+the Things 3.24.2 Mac app on 2026-11-09 were read back from history index 1644: completing an item wrote
+`{"t":1,"e":"ChecklistItem3","p":{"ss":3,"md":<now>,"sp":<now>}}`, renaming wrote `{"t":1,...,"p":{"md":<now>,"tt":"Beta renamed"}}`,
+and removing wrote `{"t":2,"e":"ChecklistItem3","p":{}}`. The client writes exactly these. Reopening a completed item (`ss` 0,
+`sp` null) mirrors the create shape and has not been sampled. The validator
 checks every checklist key it writes (exactly one parent id in `ts`, `ss` in 0/2/3, finite `ix`, timestamps). The parent to-do
 was written in the same commit as `Task7`, with `md` set on create (so `md` on creates is safe).
 

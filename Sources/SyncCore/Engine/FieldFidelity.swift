@@ -218,8 +218,7 @@ extension SyncPass {
     // MARK: Checklist
 
     func decideChecklist(base: Fingerprint?, reminder r: ReminderItem, task t: ThingsTask) -> ChecklistOutcome {
-        // TODO(orchestrator): checklist WRITES to Things stay off (`syncChecklists`, default false) until the completion
-        // (`ss` 3 + `sp`) and deletion (`t` 2) shapes of ChecklistItem3 have been sampled from the Things app.
+        // Checklist writes to Things use the shapes sampled from the Things app (docs/SPEC.md); `syncChecklists` turns them off.
         let write = config.syncChecklists
         func unique<T>(_ items: [T], title: (T) -> String) -> [(key: String, item: T)] {
             var seen = Set<String>(), out: [(String, T)] = []
