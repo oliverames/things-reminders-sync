@@ -59,6 +59,7 @@ private struct ListRow: View {
     @State private var saving = false
     /// A save that turns the list off (or removes it) waiting for the user to choose what happens to the app's copies.
     @State private var stopRequest: StopRequest?
+    @State private var showingOptions = false
 
     private struct StopRequest: Identifiable {
         let id = UUID()
@@ -167,6 +168,7 @@ private struct ListRow: View {
                 Circle().fill(Color(hex: list.colorHex) ?? .gray).frame(width: 10, height: 10)
                 Text(list.title)
                 if let source = list.sourceTitle { Text(source).foregroundStyle(.secondary) }
+                if current.enabled && current.paused { Text("Paused").foregroundStyle(.secondary) }
             }
         }
         .disabled(!list.allowsModifications && !current.enabled)
@@ -256,6 +258,23 @@ private struct ListRow: View {
             if current.mode == .heading {
                 Text("The list mirrors the to-dos under this heading. Sections are not synced.")
                     .font(.callout).foregroundStyle(.secondary)
+            }
+            Toggle("Pause syncing", isOn: Binding(get: { current.paused }, set: { value in edit { $0.paused = value } }))
+                .help("A paused list keeps its links and settings. Nothing is copied either way until you turn this off.")
+            LabeledContent {
+                Button("Options…") { showingOptions = true }
+                    .help("Direction, dates, deletes, tags and sections for this list")
+            } label: {
+                if current.hasCustomPreferences {
+                    Label("Customized", systemImage: "slider.horizontal.3")
+                        .help("This list has options that differ from the defaults.")
+                } else {
+                    Text("Default options")
+                }
+            }
+            .sheet(isPresented: $showingOptions) {
+                ListOptionsSheet(listTitle: list.title, mapping: current, config: coordinator.config,
+                                 tags: coordinator.thingsTags.map(\.title), edit: edit)
             }
         }
         if coordinator.config.mappings.contains(where: { $0.id == list.id }) {

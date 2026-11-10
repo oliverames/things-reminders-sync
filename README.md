@@ -84,7 +84,7 @@ You can change a list's mode or target later. The app moves the items it linked 
 | Due date and time | When date and reminder time | A list can map the due date to the Things deadline instead (`dueMapsTo`), and can send reminders due this evening to This Evening (`eveningFromHour`). See the per-list settings. |
 | Completed | Completed | Canceled in Things counts as completed in Reminders, unless the list's `canceledBecomes` is `deleted`. |
 | Repeat rule | Repeat rule | Daily, weekly, monthly and yearly rules, including nth weekdays, the last day of the month, and end conditions. |
-| Flag | Your **Important** tag | The tag name is `flaggedTagTitle` in `config.json`. Settings has no control for it yet. |
+| Flag | Your **Important** tag | Choose the tag in Settings, on the Options tab (`flaggedTagTitle` in `config.json`). |
 | Priority high | A tag you choose | Off until you set `priorityTag` in `config.json`. See "More options" below. |
 | Tags | Tags with the same name | Only tags that already exist in Things, matched without regard to case. The app never creates a tag for this unless you turn on `createMissingTags`. The only tag it ever creates is the target of a tag-mode list you save as "New…". |
 | Subtasks | Checklist items | Both ways: adding, renaming, completing or removing one changes the other. Set `syncChecklists` to `false` in `config.json` to stop writing checklists in Things. |
@@ -120,7 +120,7 @@ Some rules only one app can express. Reminders has no "repeat after completion,"
 
 ## Configuration
 
-Settings live in the app, apart from the flag tag name. These are the defaults:
+Settings live in the app. These are the defaults:
 
 | Setting | Default | Range | What it does |
 |---|---|---|---|
@@ -134,7 +134,9 @@ The ranges are what Settings offers. A `config.json` edited by hand is only held
 
 ### Per-list settings
 
-Each list can also carry its own settings. Settings has no controls for them yet, so for now they go in that list's entry in `config.json`. Leave one out and the list behaves as it always has.
+Each list can also carry its own settings. In Settings, on the Lists tab, a list has a **Pause syncing** switch and an **Options…** button. The button opens a sheet with the settings below, grouped under Direction, Dates, Deletes and completed items, Tags and people, and Sections. A list with any setting changed from its default shows **Customized** on its row. The sheet edits the same draft as the rest of the list, so the list's Save and Revert buttons cover it. Tags are chosen from the tags Things already has, and a setting that does not apply to the list is turned off with a line that says why.
+
+The table gives the name of each setting in that list's entry in `config.json`. Leave one out and the list behaves as it always has.
 
 | Key | Default | What it does |
 |---|---|---|
@@ -149,12 +151,12 @@ Each list can also carry its own settings. Settings has no controls for them yet
 | `eveningFromHour` | none | An hour from 0 to 23. A reminder due today at or after that hour arrives in This Evening, and a linked to-do moves there when its reminder's due date changes to this evening. The app does this once per due date, so a to-do you move back to Today stays there. Nothing changes from Things to Reminders, and a date you set in Things is left where you put it. Ignored when `dueMapsTo` is `deadline`. |
 | `canceledBecomes` | `completed` | `deleted` deletes the reminder when you cancel its to-do in Things, instead of completing it. It counts as a deletion: it respects `propagateDeletes` and the deletion safety limit, and a list that is one-way from Reminders ignores it. A to-do you only complete still completes the reminder. |
 | `syncSomeday` | `true` | `false` keeps Someday out of Reminders. A to-do in Someday gets no reminder. A linked to-do you move to Someday has its reminder deleted (again respecting `propagateDeletes` and the safety limit), and when it leaves Someday the reminder is made again. A reminder is still copied to Things as before, including one that arrives in Someday. |
-| `assigneeTags` | `{}` | Maps people a shared list is shared with to Things tags, for example `{"ana@example.com": "Ana", "me": "Mine"}`. The key is a sharee id, address, name or `me`; the value is a Things tag title. Give a linked to-do one of the tags and its reminder is assigned to that person. Remove the tag and the assignment is cleared. This works from Things to Reminders only: RemCTL cannot read who a reminder is assigned to, so an assignment you make in Reminders is never seen and never changes Things. If a to-do carries two of the tags, the first key in alphabetical order wins. If the write fails (the list is not shared, say), the app logs a warning and tries again only when the to-do's tags change. The tags still sync as ordinary tags. |
+| `assigneeTags` | `{}` | Maps people a shared list is shared with to Things tags, for example `{"ana@example.com": "Ana", "me": "Mine"}`. The key is a sharee id, email address, objectUUID or `me`, typed by hand because the app cannot list the people a list is shared with; the value is a Things tag title. Give a linked to-do one of the tags and its reminder is assigned to that person. Remove the tag and the assignment is cleared. This works from Things to Reminders only: RemCTL cannot read who a reminder is assigned to, so an assignment you make in Reminders is never seen and never changes Things. If a to-do carries two of the tags, the first key in alphabetical order wins. If the write fails (the list is not shared, say), the app logs a warning and tries again only when the to-do's tags change. The tags still sync as ordinary tags. |
 | `sectionsAsProjects` | `false` | Area lists only. `true` mirrors each Reminders section as a Things project inside the area. A reminder in a section lives in the project of that name, and one with no section sits loose in the area. Move a reminder to another section and its to-do moves to that project. Move a to-do into another project of the area and its reminder moves to that section. The app creates a missing project or section and removes one it created once it is empty. Projects of yours in the area that match no section are left alone and their to-dos are not synced. RemCTL cannot take a reminder out of a section, so a to-do you move out of every project keeps its reminder's section in Reminders. |
 
 ### More options
 
-These apply to every list and also go in `config.json`.
+These apply to every list. They are in Settings on the Options tab, under Tags, along with the flag tag and a **Sync checklists** switch. Both tags are chosen from the tags Things already has, and the priority tag cannot be the flag tag. The table gives their names in `config.json`.
 
 | Key | Default | What it does |
 |---|---|---|

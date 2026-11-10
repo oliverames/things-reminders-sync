@@ -438,7 +438,7 @@ public struct ReminderPatch: Codable, Hashable, Sendable {
     public var addSubtasks: [String]?
     /// Sets the priority (`priority`, a plain RemCTL field).
     public var priority: ReminderPriority?
-    /// `.some(sharee)` assigns the reminder in a shared list (`--private --assign`: a sharee id, address, name or
+    /// `.some(sharee)` assigns the reminder in a shared list (`--private --assign`: a sharee id, address, objectUUID or
     /// "me"); `.some(nil)` clears the assignment (`--private --unassign`). RemCTL cannot read an assignment back.
     public var assignee: String??
     public init(title: String? = nil, notes: String? = nil, due: DueDate?? = nil, completed: Bool? = nil,
@@ -594,7 +594,7 @@ public struct ListMapping: Codable, Hashable, Sendable, Identifiable {
     public var canceledBecomes: CanceledOutcome
     /// When false, to-dos in Someday are kept out of Reminders.
     public var syncSomeday: Bool
-    /// Reminders sharee (id, address, name or "me") -> Things tag title. A linked to-do carrying one of the tags
+    /// Reminders sharee (id, address, objectUUID or "me") -> Things tag title. A linked to-do carrying one of the tags
     /// assigns its reminder to that sharee. One way only: RemCTL cannot read an assignment. Empty for off.
     public var assigneeTags: [String: String]
     /// For `.area` mode: mirror each Reminders section as a Things project inside the area. Ignored in other modes.

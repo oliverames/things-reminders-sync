@@ -176,7 +176,7 @@ Only to-dos sync: never projects or headings (checklist items sync as part of th
 Each `ListMapping` carries the preferences below. Every key is optional in `config.json`, and its default is how
 the app behaved before the preference existed, so an old file decodes and behaves as before. Code:
 `SharedTypes.swift` (`ListMapping`, `SyncDirection`, `UndatedArrival`), `SyncEngine.swift` ("Per-list
-preferences"), `FieldFidelity.swift`. The Settings window has no controls for them yet.
+preferences"), `FieldFidelity.swift`. Settings edits them in each list's Options sheet (`ListOptionsSheet.swift`); `paused` is a toggle on the list itself.
 
 **`direction`**: `"twoWay"` (default), `"remindersToThings"` or `"thingsToReminders"`. In a one-way list the first
 side named is the source and the other the receiver.
@@ -266,7 +266,7 @@ whose own `includeCompletedOnFirstLink` is `true`.
 
 Six optional mappings between fields the two apps hold natively. Four are per list (`ListMapping`), two are global
 (`SyncConfig`). Every key is optional in `config.json` and its default is the behavior before the key existed.
-The Settings window has no controls for them. Code: `SharedTypes.swift`, `SyncEngine.swift` (`merge`,
+Settings edits `flaggedTagTitle`, `priorityTag`, `createMissingTags` and `syncChecklists` on the Options tab. Code: `SharedTypes.swift`, `SyncEngine.swift` (`merge`,
 `processLink`, `createThings`, `createReminder`, `runDeletions`), `FieldFidelity.swift` (`buildTagEnvironment`,
 `createMissingTags`, `decidePriority`), `ThingsCloudClient.swift`. Tests: `EngineNativeFieldTests.swift`,
 `ThingsCloudNativeFieldTests.swift`.
@@ -368,7 +368,7 @@ Code: `AssigneeSync.swift`, `RemCTLReminders.update`. Tests: `EngineAssigneeTest
 
 - One way only, Things to Reminders. RemCTL shows no assignee in any read (export, show and info rows have no such
   field), so an assignment made in Reminders is never seen and never changes Things.
-- The write is `update_reminder` with `private: true` and `assign: <sharee>` (a sharee id, address, name or `me`)
+- The write is `update_reminder` with `private: true` and `assign: <sharee>` (a sharee id, address, objectUUID or `me`)
   or `unassign: true`, RemCTL's `edit --private --assign` and `--unassign`. It only works in a shared list.
 - When a linked, open to-do carries a mapped tag (titles compare without case), the reminder is assigned to that
   sharee. When no mapped tag is left, the assignment the app wrote is cleared. An assignment the app never wrote
@@ -663,8 +663,8 @@ Cleanup, always limited to ledger entries and never to a container a mapping sti
   status row with a Check Again button and an optional RemCTL path), **Lists** (saving a list off asks "Keep Everything" or "Remove N synced copies…"; each list has "Remove list from sync…"; every Reminders list with an enable toggle, a mode
   picker (Project, Area, Tag, Heading), a target picker of existing Things projects/areas/tags plus "New …" with a title,
   and the linked-item count; Heading mode picks the project first, then one of its headings or "New …"; Project mode has a
-  "Sync sections as headings" toggle; the per-list preferences have no controls yet), **Options** (Things poll interval, Reminders poll interval, reconcile interval, include completed on first
-  link (saving it off offers to remove the completed copies), propagate deletes, open at login via `SMAppService.mainApp`), **Activity** (log, newest
+  "Sync sections as headings" toggle; each list also has a "Pause syncing" toggle and an "Options…" button that opens a sheet with its preferences under Direction, Dates, Deletes and completed items, Tags and people, and Sections; the row shows "Customized" when any differs from its default; the sheet edits the row's draft, so the row's Save and Revert cover it; tag fields are pickers over existing Things tags; logic in `SettingsSupport.swift`), **Options** (Things poll interval, Reminders poll interval, reconcile interval, include completed on first
+  link (saving it off offers to remove the completed copies), propagate deletes, sync checklists, a Tags section with the flag tag, the priority tag (never the same tag as the flag) and create missing tags, open at login via `SMAppService.mainApp`), **Activity** (log, newest
   first, with levels).
 - Credentials in the Keychain (generic password, service `com.oliverames.ThingsRemindersSync`).
 - Bundle id `com.oliverames.ThingsRemindersSync`, display name "Things Reminders Sync",

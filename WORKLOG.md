@@ -1,5 +1,25 @@
 # Worklog
 
+## 2026-11-09: Settings controls for the per-list and tag options
+
+UI work on top of the engine keys below. Tests: `swift test --parallel`, 425 passing (was 416). The app was not
+launched, so no layout was checked on screen. Nothing was run against the real apps and nothing was committed.
+
+- Lists tab: each list has a "Pause syncing" toggle and an "Options…" button, with "Customized" beside it when a
+  preference differs from its default. The button opens `ListOptionsSheet.swift`, a sheet with the sections
+  Direction, Dates, Deletes and completed items, Tags and people, and Sections. It edits the row's draft, so the
+  row's Save and Revert cover it.
+- Options tab: "Sync checklists" under Behavior and a Tags section for `flaggedTagTitle`, `priorityTag` and
+  `createMissingTags`. The existing change detection and save merge include the four keys.
+- Tag fields are pickers over the Things tags the coordinator knows, with "None". A saved tag Things no longer has
+  is shown as "(not in Things)". The priority tag picker disables the flag tag, and the reverse.
+- Overrides are three-way pickers: "Use global setting", "On", "Off". A preference a mode or direction ignores is
+  disabled with a one-line reason.
+- `assigneeTags` is a list of rows: a typed person and a tag picker. The app cannot list sharees, and the help
+  says so.
+- Logic is in `SettingsSupport.swift` (SyncCore). Tests: `SettingsSupportTests.swift`.
+- Docs: a sharee is an id, address, objectUUID or "me", not a name (README, SPEC, `SharedTypes.swift`).
+
 ## 2026-11-09: assignee tags, sections as projects, and the repeat rule-edit fix
 
 Engine work, no UI. Tests: `swift test --parallel`, 416 passing (was 399). Nothing was run against the real apps,

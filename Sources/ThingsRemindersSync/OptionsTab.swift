@@ -10,9 +10,10 @@ struct OptionsTab: View {
     @State private var completedCopies: CompletedCopiesPreview?
 
     /// Only the option fields; list mappings are edited on the Lists tab.
-    private static func options(_ c: SyncConfig) -> [Int] {
-        [c.pollSeconds, c.remindersPollSeconds, c.reconcileMinutes,
-         c.includeCompletedOnFirstLink ? 1 : 0, c.propagateDeletes ? 1 : 0]
+    private static func options(_ c: SyncConfig) -> [String] {
+        ["\(c.pollSeconds)", "\(c.remindersPollSeconds)", "\(c.reconcileMinutes)",
+         "\(c.includeCompletedOnFirstLink)", "\(c.propagateDeletes)", "\(c.syncChecklists)",
+         "\(c.createMissingTags)", c.flaggedTagTitle, c.priorityTag ?? ""]
     }
     private var isDirty: Bool { Self.options(draft) != Self.options(coordinator.config) }
 
@@ -33,6 +34,30 @@ struct OptionsTab: View {
                 Toggle("Include completed items on first link", isOn: $draft.includeCompletedOnFirstLink)
                 Toggle("Propagate deletes", isOn: $draft.propagateDeletes)
                 Text("Deleting a reminder moves its Things item to the Trash, and deleting a Things item deletes the reminder. Nothing is permanently deleted in Things.")
+                    .font(.callout).foregroundStyle(.secondary)
+                Toggle("Sync checklists", isOn: $draft.syncChecklists)
+                Text("A to-do's checklist and its reminder's subtasks are kept in step. A list can override this in its options.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            Section("Tags") {
+                let tags = coordinator.thingsTags.map(\.title)
+                TagPicker(label: "Flagged reminders get the tag",
+                          selection: Binding(get: { draft.effectiveFlaggedTag }, set: { draft.flaggedTagTitle = $0 ?? "" }),
+                          known: tags, excluded: draft.effectivePriorityTag)
+                Text("A flagged reminder's to-do carries this tag, and the tag flags the reminder. With None, flags are not synced.")
+                    .font(.callout).foregroundStyle(.secondary)
+                TagPicker(label: "High priority reminders get the tag",
+                          selection: Binding(get: { draft.effectivePriorityTag }, set: { draft.priorityTag = $0 }),
+                          known: tags, excluded: draft.effectiveFlaggedTag)
+                if draft.priorityTagClashesWithFlag {
+                    Text("The priority tag is the same as the flag tag, so it is ignored. Choose a different tag.")
+                        .font(.callout).foregroundStyle(.secondary)
+                } else {
+                    Text("A high priority reminder's to-do carries this tag, and the tag sets high priority. It cannot be the flag tag.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                Toggle("Create missing tags", isOn: $draft.createMissingTags)
+                Text("A reminder tag that Things does not have is created there, and removed again once nothing uses it. When off, such tags stay in Reminders only.")
                     .font(.callout).foregroundStyle(.secondary)
             }
             Section("General") {
@@ -82,6 +107,10 @@ struct OptionsTab: View {
         merged.reconcileMinutes = draft.reconcileMinutes
         merged.includeCompletedOnFirstLink = draft.includeCompletedOnFirstLink
         merged.propagateDeletes = draft.propagateDeletes
+        merged.syncChecklists = draft.syncChecklists
+        merged.flaggedTagTitle = draft.flaggedTagTitle
+        merged.priorityTag = draft.priorityTag
+        merged.createMissingTags = draft.createMissingTags
         saving = true
         Task {
             await coordinator.updateConfig(merged)
