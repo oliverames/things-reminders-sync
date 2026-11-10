@@ -262,18 +262,116 @@ without case); the app never creates it, and logs one `.info` per full pass when
 replaces the global setting of the same name for this list. "Remove completed copies" leaves the copies of a list
 whose own `includeCompletedOnFirstLink` is `true`.
 
+## Native field mappings
+
+Six optional mappings between fields the two apps hold natively. Four are per list (`ListMapping`), two are global
+(`SyncConfig`). Every key is optional in `config.json` and its default is the behavior before the key existed.
+The Settings window has no controls for them. Code: `SharedTypes.swift`, `SyncEngine.swift` (`merge`,
+`processLink`, `createThings`, `createReminder`, `runDeletions`), `FieldFidelity.swift` (`buildTagEnvironment`,
+`createMissingTags`, `decidePriority`), `ThingsCloudClient.swift`. Tests: `EngineNativeFieldTests.swift`,
+`ThingsCloudNativeFieldTests.swift`.
+
+Things shapes. The Swift client wrote neither a deadline nor This Evening before. Both are copied from the
+JavaScript client (`things3-mcp-server/src/things-client.js`), which writes them against the live account, and both
+pass through `ThingsChangeValidator` (`dd`, `sr` and `tir` must be midnight UTC):
+
+| Write | Keys | Copied from |
+|---|---|---|
+| Deadline on create | `dd` = midnight UTC of the day, in the full `Task6` create | `buildTaskCreate` |
+| Deadline on update | `dd` (a day or null) and `md`, nothing else | `updateTask` (`updates.deadline`) |
+| This Evening on create | `st` 1, `sb` 1, `sr` = `tir` = today, `ato` from the due time | `schedulingFields("evening")`, `withReminder` |
+| This Evening on update | `st` 1, `sb` 1, `sr` = `tir` = today and `md`; `ato` only when the same patch changes the time | `updateTask` with `when: "evening"` |
+| Tag create | `Tag4` with `tt`, `sh` null, `pn` [], `ix` 0, `xx` (the client already wrote this for tag-mode targets) | `createTag` |
+
+The client refuses This Evening for any day but today, and a deadline or This Evening on a repeating template
+(the JavaScript client refuses a deadline there too). `sb` 1 is written in no other case.
+
+**`dueMapsTo`** (per list): `"when"` (default) or `"deadline"`.
+
+- With `deadline`, the reminder's due date and the to-do's deadline (`dd`) are the synced pair, compared by day.
+  The to-do's When is neither read nor written. A new to-do starts where a reminder with no due date would
+  (`undatedArriveAs`). A new reminder takes the deadline as an all-day due date, not the start day.
+- A deadline changed in Things moves the reminder to that day and keeps the reminder's time. A due date changed in
+  Reminders writes `dd` alone. Clearing either clears the other.
+- A due time stays in Reminders only. A change of the time alone, or of the When in Things, is not a change.
+- Repeating pairs (`repeatMode` set) keep today's When-based behavior in such a list.
+- The fingerprint records the mode (`dueIsDeadline`) and holds the day only. When a list changes mode, each pair
+  settles its date once as on a first link: a missing date never replaces a real one, so turning the mode on
+  copies existing due dates to deadlines and leaves each When as it is.
+- A one-way list copies the date from its source only, as for any field.
+- The Things database now stamps the due field when `dd` changes, so a deadline edit has its own time for
+  conflicts.
+
+**`eveningFromHour`** (per list): an hour from 0 to 23, or absent (default). A value outside the range is ignored.
+
+- A reminder due today at or after that hour is created in This Evening. A linked plain to-do moves there when its
+  reminder is due today at or after the hour and the to-do starts today (or the same patch moves it to today).
+- The rule runs once per due date: the fingerprint keeps the due date it was settled for (`eveningFor`). A to-do
+  moved out of This Evening by hand is not put back until the reminder's due date changes again.
+- Things to Reminders is unchanged. A date that Things supplied (a to-do created there, or a When edited there)
+  is recorded as settled and the to-do is left where the user put it.
+- Not applied to repeating pairs, to a list that is one-way from Things, or when `dueMapsTo` is `deadline`.
+
+**`canceledBecomes`** (per list): `"completed"` (default) or `"deleted"`.
+
+- With `deleted`, a plain linked to-do that is canceled in Things (and whose reminder is still open and was not
+  yet recorded as completed) has its reminder queued in `pendingDeletes`, so the deletion safety limit applies and
+  a held deletion is retried. The canceled to-do is kept and gets no new reminder.
+- It is a deletion, so it follows the deletion rules: it needs deletes to be propagated for the list, and it does
+  nothing in a list that is one-way from Reminders or on the first pass after a pause. In those cases the
+  reminder is completed (or left alone in the one-way list) as before.
+- A to-do canceled before the option was set keeps its completed reminder.
+
+**`syncSomeday`** (per list): `true` (default) or `false`. Someday means an open to-do with `st` 2 and no start
+day that is not a repeating template.
+
+- A to-do in Someday is not copied to Reminders and is not paired by title.
+- A plain linked to-do that moves to Someday has its reminder deleted through `pendingDeletes` (same rules as
+  above: propagated deletes, not one-way from Reminders, not after a pause, safety limit). After the deletion the
+  link is parked with the to-do marked detached. `reattachParkedLinks` keeps it parked while the to-do is in
+  Someday; when the to-do leaves Someday the parked link is dropped and the to-do gets a new reminder and link in
+  the same pass.
+- Only a move that was seen counts: the fingerprint keeps `thingsSomeday`, and the reminder is removed only when it
+  was `false` and the to-do is in Someday now. A to-do that was already in Someday when the option was turned off,
+  or that arrived there from Reminders (`undatedArriveAs: someday`), keeps its reminder.
+- Reminders to Things is unchanged.
+
+**`priorityTag`** (global): a Things tag title, or absent (default, off).
+
+- Works like the flag: the tag is found by exact title, must already exist, and is left out of tag sync. Priority
+  "high" and the tag are one on/off value with an agreed state in the fingerprint (`priorityHigh`).
+- Reminders high adds the tag. Reminders from high to anything else removes the tag and leaves the priority.
+  The tag added in Things sets priority high (whatever the priority was). The tag removed in Things sets "none",
+  which can only happen while the reminder is high. Low, medium and none are otherwise never written or compared.
+- Ignored, with one `.info` per full pass, when it equals `flaggedTagTitle`, names a missing tag, or names the
+  target of a tag-mode list.
+- RemCTL: read from the export row's `priority` ("none", "low", "medium", "high"), written as the plain
+  `priority` argument of `update_reminder`. It is part of the content hash, so a change starts a pass.
+
+**`createMissingTags`** (global): `false` (default) or `true`.
+
+- Before links are processed, every tag of a reminder whose tags will be written to Things (a linked reminder, or
+  an open unlinked one about to get a to-do, in a list that is not one-way from Things) is checked. A tag with no
+  Things tag of that title in any case is created (`createTag`, the `Tag4` shape above), added to the tag
+  environment, and applied by the normal tag sync in the same pass.
+- Each created tag is recorded in the ownership ledger (`ownedThings`, kind `tag`, under the list of the reminder
+  that needed it). The ledger cleanup removes it once no task carries it, but not while any reminder still has a
+  tag of that title.
+- Never for a title that `alwaysTag`, `flaggedTagTitle` or `priorityTag` names, and never for a title with a
+  comma (RemCTL cannot write one back).
+
 ## Field mapping
 
 | Reminders | Things |
 |---|---|
 | title | `tt` |
 | notes (plain text) + rich link | notes (Markdown, link as a trailing line), see Field fidelity |
-| due all-day day | When = that day (`sr`), no reminder |
+| due all-day day | When = that day (`sr`), no reminder; or the deadline (`dd`) with `dueMapsTo: deadline` |
 | due day + time | When = that day, reminder `ato` = that time |
 | no due date | Anytime; but leave a Things item in Someday alone, and leave Today/Evening alone if it has no time |
 | completed + completionDate | `ss 3` + `sp` |
 | not completed | `ss 0`, `sp` null |
-| (Things canceled) | completed in Reminders |
+| (Things canceled) | completed in Reminders; deleted with `canceledBecomes: deleted` |
 | list | placement per the mapping (moving between mapped lists moves between targets, and back) |
 | section (project mode, `syncSections`) | heading title of the to-do in the target project |
 
@@ -293,8 +391,9 @@ Patches carry only the fields that changed (never a whole-item rewrite). Code: `
 | flagged | the tag titled `flaggedTagTitle` (default "Important") | two-way, see "Flagged" |
 | tags | tags with the same title | two-way set merge, existing Things tags only, see "Tags" |
 | subtasks (title, completed) | checklist items (`ChecklistItem3`) | see "Subtasks and checklists" |
-| priority, urgent, early reminders, alarms other than the due time, location, images, assignee | none | preserved |
-| none | deadline (`dd`), This Evening, checklist items when checklist writes are off | preserved |
+| priority "high" | the tag titled `priorityTag` (off by default) | two-way like the flag, see "Native field mappings" |
+| other priorities, urgent, early reminders, alarms other than the due time, location, images, assignee | none | preserved |
+| none | deadline (`dd`) unless `dueMapsTo` is `deadline`, This Evening (written only by `eveningFromHour`), checklist items when checklist writes are off | preserved |
 
 **Fingerprint.** `notes` is the Things notes as last written or seen (trimmed). New optional fields: `remindersNotes` (the
 reminder's notes), `url`, `flagged`, `tags` (agreed titles) and `checklist` (agreed title and done pairs). Old state files decode with
@@ -330,8 +429,8 @@ and one `.info` is logged per full pass. Two-way: the side that differs from the
 as unflagged, so an upgrade unites flags and removes none). Written with `update --private flagged`.
 
 **Tags.** Only titles that already exist in Things (matched without case, because Reminders treats tags that differ only in case
-as one; this app never creates a tag for a reminder's tag; titles with a comma are skipped
-because `set_tags` takes one comma-separated string), minus the flagged tag and every tag a tag-mode list owns. Set merge against the
+as one; this app never creates a tag for a reminder's tag unless `createMissingTags` is on; titles with a comma are skipped
+because `set_tags` takes one comma-separated string), minus the flagged tag, the priority tag, each list's `alwaysTag` and every tag a tag-mode list owns. Set merge against the
 agreed titles: a title added on a side is added to the other, a title removed from a side is removed from the other, and a
 conflict cannot arise. A Reminders tag with no Things counterpart is preserved and never removed. Reminders is written with
 `--private --set-tags` carrying the full resulting set (or `--clear-tags`).

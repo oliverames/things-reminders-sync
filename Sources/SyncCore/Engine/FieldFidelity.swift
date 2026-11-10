@@ -78,6 +78,8 @@ struct ChecklistOutcome {
 /// Tags the engine may sync: titles that exist in Things, minus the flagged tag and every tag a tag-mode list owns.
 struct TagEnvironment {
     var flaggedId: String?
+    /// The existing tag `SyncConfig.priorityTag` names; nil when priority is not synced.
+    var priorityId: String?
     /// Mappable tag title, lowercased -> Things tag id (the oldest id when several share a title). Titles match
     /// without case because Reminders treats `#errands` and `#Errands` as one tag.
     var idByKey: [String: String] = [:]
@@ -99,6 +101,17 @@ extension SyncPass {
         if !wanted.isEmpty { env.flaggedId = sorted.first { $0.title == wanted }?.id }
         var excluded: Set<String> = Set(config.mappings.filter { $0.mode == .tag }.compactMap(\.targetId))
         if let f = env.flaggedId { excluded.insert(f) }
+        // `priorityTag` works like the flag tag: an existing tag found by its exact title, never synced as a tag.
+        let priority = (config.priorityTag ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !priority.isEmpty {
+            var why: String?
+            if priority == wanted { why = "`priorityTag` and `flaggedTagTitle` name the same tag, \"\(priority)\"" }
+            else if let tag = sorted.first(where: { $0.title == priority }) {
+                if excluded.contains(tag.id) { why = "a list already syncs to the tag \"\(priority)\"" }
+                else { env.priorityId = tag.id; excluded.insert(tag.id) }
+            } else { why = "Things has no tag titled \"\(priority)\" (this app never creates one)" }
+            if let why, isFull { log(.info, "Priority is not synced: \(why)") }
+        }
         // A list's `alwaysTag` is an existing tag (exact title first, then without case). It is never synced as a tag,
         // and a list that syncs one way from Things does not put it on anything (the app writes nothing to Things there).
         for m in config.mappings {
@@ -120,6 +133,47 @@ extension SyncPass {
         tagEnv = env
         if isFull, env.flaggedId == nil {
             log(.info, "Flags are not synced: Things has no tag titled \"\(wanted)\" (this app never creates one; set the tag title in the config)")
+        }
+    }
+
+    /// `createMissingTags`: makes a Things tag for every tag of a syncing reminder that Things has no tag for (no tag
+    /// of that title in any spelling of case). Never for a title one of the `alwaysTag`, `flaggedTagTitle` or
+    /// `priorityTag` settings names: those tags must exist. The tag is recorded in the ownership ledger as created by
+    /// this app, and the tag sync that follows in this pass puts it on the to-do.
+    func createMissingTags() async {
+        guard config.createMissingTags, isFull || remindersChanged else { return }
+        let key = TagEnvironment.key
+        var taken = Set(snapshot.tags.values.map { key($0.title) })
+        for title in [config.flaggedTagTitle, config.priorityTag ?? ""] + config.mappings.compactMap(\.alwaysTag) {
+            taken.insert(key(Fingerprint.normalize(title)))
+        }
+        var linkedThrough: [String: String] = [:]
+        for link in store.links { linkedThrough[link.reminderId] = link.mappingId }
+        var wanted: [String: (title: String, mappingId: String)] = [:]
+        for r in remindersById.values.sorted(by: { $0.id < $1.id }) where !r.tags.isEmpty {
+            // Only reminders whose tags will be written to Things: linked ones, and open ones about to get a to-do.
+            let mappingId: String
+            if let linked = linkedThrough[r.id] { mappingId = linked }
+            else if !r.completed, !store.detachedReminderIds.contains(r.id), !Fingerprint.normalize(r.title).isEmpty { mappingId = r.listId }
+            else { continue }
+            guard let m = activeById[mappingId], m.direction != .thingsToReminders else { continue }
+            for name in r.tags {
+                let title = Fingerprint.normalize(name), k = key(title)
+                // A title with a comma cannot be written back to Reminders, so it never syncs.
+                guard !title.isEmpty, !title.contains(","), !taken.contains(k), wanted[k] == nil else { continue }
+                wanted[k] = (title, m.id)
+            }
+        }
+        for (k, tag) in wanted.sorted(by: { $0.key < $1.key }) {
+            do {
+                let id = try await things.createTag(title: tag.title, parentId: nil)
+                snapshot.tags[id] = ThingsTag(id: id, title: tag.title)
+                tagEnv.idByKey[k] = id; tagEnv.titleByKey[k] = tag.title
+                store.ownedThings.append(OwnedThingsContainer(id: id, kind: .tag, mappingId: tag.mappingId, title: tag.title))
+                log(.change, "Created the Things tag \"\(tag.title)\" for a reminder tag")
+            } catch {
+                log(.warning, "Could not create the Things tag \"\(tag.title)\": \(error.localizedDescription)")
+            }
         }
     }
 
@@ -243,7 +297,18 @@ extension SyncPass {
 
     func decideFlag(base: Fingerprint?, reminder r: ReminderItem, task t: ThingsTask, source: Side? = nil) -> FlagOutcome {
         guard let fid = tagEnv.flaggedId else { return FlagOutcome(fp: base?.flagged) }
-        let rf = r.flagged, tf = t.tagIds.contains(fid), b = base?.flagged ?? false
+        return decideSwitch(reminder: r.flagged, things: t.tagIds.contains(fid), base: base?.flagged ?? false, source: source)
+    }
+
+    /// Priority "high" against the priority tag, by the flag's rule. `reminderFlag` true sets "high"; false sets
+    /// "none", which only happens when the reminder is "high" now. Other priorities are never written.
+    func decidePriority(base: Fingerprint?, reminder r: ReminderItem, task t: ThingsTask, source: Side? = nil) -> FlagOutcome {
+        guard let pid = tagEnv.priorityId else { return FlagOutcome(fp: base?.priorityHigh) }
+        return decideSwitch(reminder: r.priority == .high, things: t.tagIds.contains(pid), base: base?.priorityHigh ?? false, source: source)
+    }
+
+    /// One on/off value held by Reminders and by a Things tag, against the value both last agreed on.
+    func decideSwitch(reminder rf: Bool, things tf: Bool, base b: Bool, source: Side?) -> FlagOutcome {
         if rf == tf { return FlagOutcome(fp: rf) }
         if let source {
             // One way: the source's flag is copied when it changed; a flag only the receiver changed is ignored.
@@ -414,6 +479,14 @@ extension SyncPass {
         plan.reminderPatch.flagged = f.reminderFlag
         plan.fingerprint.flagged = f.fp
 
+        let pr = decidePriority(base: base, reminder: r, task: t, source: source)
+        if let tag = pr.thingsTag, let id = tagEnv.priorityId {
+            if tag { plan.thingsPatch.addTagIds = (plan.thingsPatch.addTagIds ?? []) + [id] }
+            else { plan.thingsPatch.removeTagIds = (plan.thingsPatch.removeTagIds ?? []) + [id] }
+        }
+        if let high = pr.reminderFlag { plan.reminderPatch.priority = high ? .high : ReminderPriority.none }
+        plan.fingerprint.priorityHigh = pr.fp
+
         let g = decideTags(base: base, reminder: r, task: t, source: source)
         if !g.thingsAdd.isEmpty { plan.thingsPatch.addTagIds = (plan.thingsPatch.addTagIds ?? []) + g.thingsAdd }
         if !g.thingsRemove.isEmpty { plan.thingsPatch.removeTagIds = (plan.thingsPatch.removeTagIds ?? []) + g.thingsRemove }
@@ -452,6 +525,10 @@ extension SyncPass {
             if let wanted = plan.reminderPatch.flagged, actual.flagged != wanted {
                 plan.fingerprint.flagged = base != nil ? base!.flagged : actual.flagged
                 log(.warning, "\"\(title)\": Reminders did not take the flag; it will be retried")
+            }
+            if let wanted = plan.reminderPatch.priority, actual.priority != wanted {
+                plan.fingerprint.priorityHigh = base != nil ? base!.priorityHigh : (actual.priority == .high)
+                log(.warning, "\"\(title)\": Reminders did not take the priority; it will be retried")
             }
             if let wanted = plan.reminderPatch.tags, RemCTLReminders.tagKeys(actual.tags) != RemCTLReminders.tagKeys(wanted) {
                 let got = RemCTLReminders.tagKeys(actual.tags)
@@ -504,6 +581,7 @@ extension SyncPass {
         var flagged: Bool?
         var tags: [String]
         var entries: [Fingerprint.ChecklistEntry]
+        var priorityHigh: Bool?
     }
 
     func thingsFields(from r: ReminderItem, mapping: ListMapping? = nil) -> ThingsFields {
@@ -517,6 +595,8 @@ extension SyncPass {
         }
         var flagged: Bool?
         if let fid = tagEnv.flaggedId { flagged = r.flagged; if r.flagged, !tagIds.contains(fid) { tagIds.append(fid) } }
+        var priorityHigh: Bool?
+        if let pid = tagEnv.priorityId { priorityHigh = r.priority == .high; if r.priority == .high, !tagIds.contains(pid) { tagIds.append(pid) } }
         var seen = Set<String>(), items: [Fingerprint.ChecklistEntry] = []
         for s in r.subtasks where seen.insert(checklistKey(s.title)).inserted && !checklistKey(s.title).isEmpty {
             items.append(.init(title: s.title, done: s.completed))
@@ -524,7 +604,7 @@ extension SyncPass {
         let entries = writeChecklist ? items : []
         return ThingsFields(notes: NotesLink.thingsNotes(notes: r.notes, url: u), tagIds: tagIds,
                             checklist: writeChecklist ? items.map { ThingsChecklistDraft(title: $0.title, completed: $0.done) } : [],
-                            flagged: flagged, tags: titles.sorted(), entries: entries)
+                            flagged: flagged, tags: titles.sorted(), entries: entries, priorityHigh: priorityHigh)
     }
 
     /// The fingerprint of a reminder that was just copied to Things.
@@ -534,6 +614,7 @@ extension SyncPass {
         fp.remindersNotes = Fingerprint.normalize(r.notes)
         fp.url = NotesLink.clean(r.url)
         fp.flagged = f.flagged
+        fp.priorityHigh = f.priorityHigh
         fp.tags = f.tags
         fp.checklist = f.entries
         return fp
@@ -551,14 +632,16 @@ extension SyncPass {
         fp.remindersNotes = Fingerprint.normalize(created.notes); fp.url = NotesLink.clean(created.url)
         var plan = MergePlan(fingerprint: fp)
         var empty = created
-        empty.url = nil; empty.tags = []; empty.flagged = false; empty.subtasks = []
+        empty.url = nil; empty.tags = []; empty.flagged = false; empty.subtasks = []; empty.priority = .none
         // The same decisions as for an existing pair, from a reminder that has nothing yet.
         let tagsOnly = decideTags(base: nil, reminder: empty, task: t)
         let flag = decideFlag(base: nil, reminder: empty, task: t)
         let list = decideChecklist(base: nil, reminder: empty, task: t)
+        let priority = decidePriority(base: nil, reminder: empty, task: t)
         var patch = ReminderPatch()
         patch.url = url
         patch.flagged = flag.reminderFlag
+        if priority.reminderFlag == true { patch.priority = .high }
         patch.tags = tagsOnly.reminderTags
         patch.addSubtasks = list.addSubtasks.isEmpty ? nil : list.addSubtasks
         plan.reminderPatch = patch
@@ -568,6 +651,7 @@ extension SyncPass {
         plan.fingerprint.remindersNotes = Fingerprint.normalize(created.notes)
         plan.fingerprint.url = url ?? NotesLink.clean(created.url)
         plan.fingerprint.flagged = flag.fp
+        plan.fingerprint.priorityHigh = priority.fp
         plan.fingerprint.tags = tagsOnly.fp
         plan.fingerprint.checklist = list.fp
         plan.base = nil
@@ -578,10 +662,10 @@ extension SyncPass {
             settle(&plan, actual: updated, afterwards: after, title: t.title)
             return (updated, plan.fingerprint)
         } catch {
-            log(.warning, "Created reminder \"\(t.title)\" but could not add its link, flag, tags or subtasks: \(error.localizedDescription); it will be retried")
+            log(.warning, "Created reminder \"\(t.title)\" but could not add its link, flag, priority, tags or subtasks: \(error.localizedDescription); it will be retried")
             var stale = plan.fingerprint
             if url != nil { stale.notes = "" }   // Things notes read as changed, so the link is written on the next pass
-            stale.flagged = nil; stale.tags = nil; stale.checklist = nil
+            stale.flagged = nil; stale.tags = nil; stale.checklist = nil; stale.priorityHigh = nil
             return (created, stale)
         }
     }

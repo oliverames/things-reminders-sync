@@ -198,12 +198,19 @@ public struct ThingsTodoPatch: Codable, Hashable, Sendable {
     public var notesBase: String?
     /// Checklist changes, written as `ChecklistItem3` entities in the same commit as the to-do.
     public var checklist: [ThingsChecklistChange]?
+    /// `.some(day)` sets the deadline (`dd`); `.some(nil)` clears it. The start state is not touched.
+    public var deadline: String??
+    /// `true` moves the to-do to This Evening (`st` 1, `sb` 1, `sr` = `tir` = today). The to-do must start today, or
+    /// the patch must set `when` to today; the client refuses anything else. Never `false`: `sb` 0 is written only
+    /// by a day change (see `ThingsChanges.schedulingUpdate`).
+    public var evening: Bool?
 
     public init(title: String? = nil, notes: String? = nil, when: DueDate?? = nil, completed: Bool? = nil,
                 completionDate: Date? = nil, placement: ThingsPlacement? = nil, addTagIds: [String]? = nil,
                 removeTagIds: [String]? = nil, trashed: Bool? = nil, recurrence: RepeatRule? = nil,
                 templateNext: DueDate? = nil, checklist: [ThingsChecklistChange]? = nil,
-                templateMinutes: Int?? = nil, notesBase: String? = nil) {
+                templateMinutes: Int?? = nil, notesBase: String? = nil, deadline: String?? = nil, evening: Bool? = nil) {
+        self.deadline = deadline; self.evening = evening
         self.checklist = checklist; self.templateMinutes = templateMinutes; self.notesBase = notesBase
         self.title = title; self.notes = notes; self.when = when; self.completed = completed
         self.completionDate = completionDate; self.placement = placement; self.addTagIds = addTagIds
@@ -214,7 +221,7 @@ public struct ThingsTodoPatch: Codable, Hashable, Sendable {
     public var isEmpty: Bool {
         title == nil && notes == nil && when == nil && completed == nil && placement == nil
             && addTagIds == nil && removeTagIds == nil && trashed == nil && recurrence == nil && templateNext == nil
-            && templateMinutes == nil && (checklist?.isEmpty ?? true)
+            && templateMinutes == nil && (checklist?.isEmpty ?? true) && deadline == nil && evening == nil
     }
 }
 
@@ -232,10 +239,16 @@ public struct ThingsTodoDraft: Codable, Hashable, Sendable {
     public var checklist: [ThingsChecklistDraft]
     /// With no `when`: create the to-do in Someday (`st` 2 with no date) instead of Anytime or the Inbox.
     public var someday: Bool
+    /// The deadline day (`dd`), or nil for none. Never set on a repeating template.
+    public var deadline: String?
+    /// Create the to-do in This Evening (`sb` 1). `when` must be today; the client refuses anything else.
+    public var evening: Bool
 
     public init(title: String, notes: String = "", when: DueDate? = nil, completed: Bool = false,
                 completionDate: Date? = nil, placement: ThingsPlacement = .inbox, tagIds: [String] = [],
-                recurrence: RepeatRule? = nil, checklist: [ThingsChecklistDraft] = [], someday: Bool = false) {
+                recurrence: RepeatRule? = nil, checklist: [ThingsChecklistDraft] = [], someday: Bool = false,
+                deadline: String? = nil, evening: Bool = false) {
+        self.deadline = deadline; self.evening = evening
         self.checklist = checklist; self.someday = someday
         self.title = title; self.notes = notes; self.when = when; self.completed = completed
         self.completionDate = completionDate; self.placement = placement; self.tagIds = tagIds
@@ -373,14 +386,20 @@ public struct ReminderItem: Codable, Hashable, Sendable, Identifiable {
     private var storedTags: [String]?
     private var storedFlagged: Bool?
     private var storedSubtasks: [ReminderSubtask]?
+    /// The reminder's priority (RemCTL `priority`). Stored only when it is not `none`, so older saved items decode.
+    public var priority: ReminderPriority {
+        get { storedPriority ?? .none }
+        set { storedPriority = newValue == .none ? nil : newValue }
+    }
+    private var storedPriority: ReminderPriority?
     /// Set only on a subtask row; the engine never links such a row as a to-do.
     public var parentId: String?
     public init(id: String, externalId: String? = nil, listId: String, title: String, notes: String = "",
                 due: DueDate? = nil, completed: Bool = false, completionDate: Date? = nil,
                 lastModified: Date? = nil, isRepeating: Bool = false, section: String? = nil,
                 recurrence: RepeatRule? = nil, url: String? = nil, tags: [String] = [], flagged: Bool = false,
-                subtasks: [ReminderSubtask] = [], parentId: String? = nil) {
-        self.url = url; self.parentId = parentId
+                subtasks: [ReminderSubtask] = [], parentId: String? = nil, priority: ReminderPriority = .none) {
+        self.url = url; self.parentId = parentId; self.storedPriority = priority == .none ? nil : priority
         self.storedTags = tags.isEmpty ? nil : tags; self.storedFlagged = flagged ? true : nil
         self.storedSubtasks = subtasks.isEmpty ? nil : subtasks
         self.recurrence = recurrence
@@ -392,6 +411,9 @@ public struct ReminderItem: Codable, Hashable, Sendable, Identifiable {
     /// When the app first saw `field` at its current value; falls back to the reminder's one stamp.
     public func modified(_ field: SyncField) -> Date? { fieldModified?[field.rawValue] ?? lastModified }
 }
+
+/// A reminder's priority, as RemCTL names it (`remctl edit --priority`).
+public enum ReminderPriority: String, Codable, CaseIterable, Sendable { case none, low, medium, high }
 
 public struct ReminderPatch: Codable, Hashable, Sendable {
     public var title: String?
@@ -414,16 +436,20 @@ public struct ReminderPatch: Codable, Hashable, Sendable {
     public var tags: [String]?
     /// Adds subtasks with these titles to the reminder (`--private --subtasks`).
     public var addSubtasks: [String]?
+    /// Sets the priority (`priority`, a plain RemCTL field).
+    public var priority: ReminderPriority?
     public init(title: String? = nil, notes: String? = nil, due: DueDate?? = nil, completed: Bool? = nil,
                 completionDate: Date? = nil, listId: String? = nil, section: String?? = nil, recurrence: RepeatRule?? = nil,
-                url: String? = nil, flagged: Bool? = nil, tags: [String]? = nil, addSubtasks: [String]? = nil) {
+                url: String? = nil, flagged: Bool? = nil, tags: [String]? = nil, addSubtasks: [String]? = nil,
+                priority: ReminderPriority? = nil) {
+        self.priority = priority
         self.url = url; self.flagged = flagged; self.tags = tags; self.addSubtasks = addSubtasks
         self.title = title; self.notes = notes; self.due = due; self.completed = completed
         self.completionDate = completionDate; self.listId = listId; self.section = section; self.recurrence = recurrence
     }
     public var isEmpty: Bool {
         title == nil && notes == nil && due == nil && completed == nil && listId == nil && section == nil && recurrence == nil
-            && url == nil && flagged == nil && tags == nil && (addSubtasks?.isEmpty ?? true)
+            && url == nil && flagged == nil && tags == nil && (addSubtasks?.isEmpty ?? true) && priority == nil
     }
 }
 
@@ -504,6 +530,22 @@ public enum UndatedArrival: String, Codable, CaseIterable, Sendable {
     case today
 }
 
+/// What a reminder's due date is in Things.
+public enum DueTarget: String, Codable, CaseIterable, Sendable {
+    /// The to-do's When (start day and reminder time), as before this setting existed.
+    case when
+    /// The to-do's deadline (`dd`). The When is left alone, and a due time stays in Reminders.
+    case deadline
+}
+
+/// What a to-do canceled in Things does to its reminder.
+public enum CanceledOutcome: String, Codable, CaseIterable, Sendable {
+    /// The reminder is completed, as before this setting existed.
+    case completed
+    /// The reminder is deleted, through the deletion path and its safety limit.
+    case deleted
+}
+
 public struct ListMapping: Codable, Hashable, Sendable, Identifiable {
     /// Reminders list id (RemCTL numeric list id).
     public var id: String
@@ -539,12 +581,26 @@ public struct ListMapping: Codable, Hashable, Sendable, Identifiable {
     public var includeCompletedOnFirstLink: Bool?
     /// Overrides `SyncConfig.syncChecklists` for this list; nil follows the global setting.
     public var syncChecklists: Bool?
+    // Native field mappings (docs/SPEC.md, "Native field mappings"). Optional in config.json like the keys above.
+    /// Whether a reminder's due date is the to-do's When or its deadline. Plain pairs only.
+    public var dueMapsTo: DueTarget
+    /// Hour (0 to 23) from which a reminder due today lands in This Evening; nil for never. Read it through
+    /// `eveningFromMinutes`, which ignores a value outside the range.
+    public var eveningFromHour: Int?
+    /// Whether a to-do canceled in Things completes or deletes its reminder.
+    public var canceledBecomes: CanceledOutcome
+    /// When false, to-dos in Someday are kept out of Reminders.
+    public var syncSomeday: Bool
 
     public init(id: String, listTitle: String, enabled: Bool = true, mode: MappingMode = .project,
                 targetId: String? = nil, targetTitle: String, projectAreaId: String? = nil, awaitingTarget: Bool = false,
                 parentProjectId: String? = nil, syncSections: Bool = true, direction: SyncDirection = .twoWay,
                 paused: Bool = false, propagateDeletes: Bool? = nil, undatedArriveAs: UndatedArrival = .anytime,
-                alwaysTag: String? = nil, includeCompletedOnFirstLink: Bool? = nil, syncChecklists: Bool? = nil) {
+                alwaysTag: String? = nil, includeCompletedOnFirstLink: Bool? = nil, syncChecklists: Bool? = nil,
+                dueMapsTo: DueTarget = .when, eveningFromHour: Int? = nil, canceledBecomes: CanceledOutcome = .completed,
+                syncSomeday: Bool = true) {
+        self.dueMapsTo = dueMapsTo; self.eveningFromHour = eveningFromHour
+        self.canceledBecomes = canceledBecomes; self.syncSomeday = syncSomeday
         self.id = id; self.listTitle = listTitle; self.enabled = enabled; self.mode = mode
         self.targetId = targetId; self.targetTitle = targetTitle; self.projectAreaId = projectAreaId
         self.awaitingTarget = awaitingTarget; self.parentProjectId = parentProjectId; self.syncSections = syncSections
@@ -556,6 +612,7 @@ public struct ListMapping: Codable, Hashable, Sendable, Identifiable {
     private enum CodingKeys: String, CodingKey {
         case id, listTitle, enabled, mode, targetId, targetTitle, projectAreaId, awaitingTarget, parentProjectId, syncSections
         case direction, paused, propagateDeletes, undatedArriveAs, alwaysTag, includeCompletedOnFirstLink, syncChecklists
+        case dueMapsTo, eveningFromHour, canceledBecomes, syncSomeday
     }
 
     public init(from decoder: Decoder) throws {
@@ -577,6 +634,16 @@ public struct ListMapping: Codable, Hashable, Sendable, Identifiable {
         alwaysTag = try c.decodeIfPresent(String.self, forKey: .alwaysTag)
         includeCompletedOnFirstLink = try c.decodeIfPresent(Bool.self, forKey: .includeCompletedOnFirstLink)
         syncChecklists = try c.decodeIfPresent(Bool.self, forKey: .syncChecklists)
+        dueMapsTo = try c.decodeIfPresent(DueTarget.self, forKey: .dueMapsTo) ?? .when
+        eveningFromHour = try c.decodeIfPresent(Int.self, forKey: .eveningFromHour)
+        canceledBecomes = try c.decodeIfPresent(CanceledOutcome.self, forKey: .canceledBecomes) ?? .completed
+        syncSomeday = try c.decodeIfPresent(Bool.self, forKey: .syncSomeday) ?? true
+    }
+
+    /// `eveningFromHour` as minutes after midnight; nil when unset or outside 0 to 23.
+    public var eveningFromMinutes: Int? {
+        guard let hour = eveningFromHour, (0...23).contains(hour) else { return nil }
+        return hour * 60
     }
 
     /// True when the list takes part in sync passes and polls: enabled, not paused, and with a target chosen.
@@ -603,11 +670,18 @@ public struct SyncConfig: Codable, Hashable, Sendable {
     /// Writes Reminders subtasks to Things checklists (create, rename, complete, delete), using the `ChecklistItem3`
     /// shapes sampled from the Things app (docs/SPEC.md). When off, Things checklists still sync to Reminders subtasks.
     public var syncChecklists: Bool
+    /// Title of the existing Things tag a reminder with priority "high" carries (two-way, like the flag). Nil or
+    /// blank: priority is not synced. Ignored when it equals `flaggedTagTitle`.
+    public var priorityTag: String?
+    /// Creates a Things tag for a reminder tag that has none of that title. Off by default.
+    public var createMissingTags: Bool
 
     public init(mappings: [ListMapping] = [], pollSeconds: Int = 15, reconcileMinutes: Int = 10,
                 includeCompletedOnFirstLink: Bool = false, propagateDeletes: Bool = true,
                 remindersPollSeconds: Int = 10, remctlPath: String? = nil,
-                flaggedTagTitle: String = "Important", syncChecklists: Bool = true) {
+                flaggedTagTitle: String = "Important", syncChecklists: Bool = true,
+                priorityTag: String? = nil, createMissingTags: Bool = false) {
+        self.priorityTag = priorityTag; self.createMissingTags = createMissingTags
         self.flaggedTagTitle = flaggedTagTitle; self.syncChecklists = syncChecklists
         self.mappings = mappings; self.pollSeconds = pollSeconds; self.reconcileMinutes = reconcileMinutes
         self.includeCompletedOnFirstLink = includeCompletedOnFirstLink; self.propagateDeletes = propagateDeletes
@@ -626,6 +700,8 @@ public struct SyncConfig: Codable, Hashable, Sendable {
         remctlPath = try c.decodeIfPresent(String.self, forKey: .remctlPath)
         flaggedTagTitle = try c.decodeIfPresent(String.self, forKey: .flaggedTagTitle) ?? "Important"
         syncChecklists = try c.decodeIfPresent(Bool.self, forKey: .syncChecklists) ?? true
+        priorityTag = try c.decodeIfPresent(String.self, forKey: .priorityTag)
+        createMissingTags = try c.decodeIfPresent(Bool.self, forKey: .createMissingTags) ?? false
     }
 }
 

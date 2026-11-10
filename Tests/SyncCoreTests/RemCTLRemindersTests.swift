@@ -99,6 +99,7 @@ actor FakeRemCTL: RemCTLTransport {
             beforeUpdate[id] = rows[id]
             if let t = arguments["title"] { edit(id, "title", t) }
             if let n = arguments["notes"] { edit(id, "notes", n) }
+            if let p = arguments["priority"] { edit(id, "priority", p) }
             // Private metadata: only honoured with `private: true`, like RemCTL (without it a url would land in the notes).
             if arguments["private"] == true {
                 if let u = arguments["url"] { edit(id, "url", u) }

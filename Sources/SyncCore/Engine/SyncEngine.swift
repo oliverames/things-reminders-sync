@@ -128,6 +128,10 @@ final class SyncPass {
     var resuming: Set<String> = []
     /// Mapping id -> id of the existing Things tag its `alwaysTag` names (never for a list that syncs one way from Things).
     var alwaysTagIds: [String: String] = [:]
+    /// Why a queued reminder deletion happens when it is not a deleted to-do (link id -> reason, for the log).
+    var deleteReasons: [UUID: String] = [:]
+    /// Links whose reminder is being removed because the to-do moved to Someday: parked once the deletion ran.
+    var parkAfterDelete: Set<UUID> = []
 
     init(engine: SyncEngine, config: SyncConfig, store: LinkStore, scope: SyncScope, force: Bool, backfillLog: [SyncLogEntry]?) {
         things = engine.things; reminders = engine.reminders; days = DayFormatter(timeZone: engine.timeZone)
@@ -178,6 +182,7 @@ final class SyncPass {
         await migrateRetargetedMappings()
         buildThingsScope()
         buildTagEnvironment()
+        await createMissingTags()
 
         reattachParkedLinks()
         let linksAtStart = store.links
@@ -495,6 +500,9 @@ final class SyncPass {
                 store.detachedThingsIds.remove(parked.thingsId)
                 store.detachedReminderIds.remove(parked.reminderId)
             case (let task?, nil):
+                // A to-do whose reminder was removed because it sits in Someday (`syncSomeday` off) stays parked
+                // until it leaves Someday. Then it is freed here and gets a reminder again like a new item.
+                if task.inSomeday, activeById[parked.mappingId]?.syncSomeday == false { keep.append(parked); continue }
                 store.detachedThingsIds.remove(task.id)          // partner gone: sync as a new item
             case (nil, let reminder?):
                 store.detachedReminderIds.remove(reminder.id)
@@ -615,6 +623,23 @@ final class SyncPass {
         let rm = activeById[reminder.listId]?.id
         let tm = thingsScope[task.id]
         guard let rm, let tm else { unlink(link, "moved out of scope", park: true); return }
+        // `canceledBecomes` and `syncSomeday`: a plain pair's reminder is removed through the deletion path. Like any
+        // deletion this needs deletes to be propagated, a list that is not one way from Reminders, and a list that
+        // is not coming back from a pause; otherwise the pair syncs as usual.
+        if link.repeatMode == nil, source != .reminders, !reminder.completed, propagatesDeletes(mapping), !resuming.contains(mapping.id) {
+            if mapping.canceledBecomes == .deleted, task.status == .canceled, !link.fingerprint.completed {
+                deleteReasons[link.id] = "its Things to-do was canceled"
+                queueDelete(mapping.id, link.id, .deleteReminder(reminder.id), title)
+                return
+            }
+            // Only a move to Someday that was seen happening: a to-do that was already there keeps its reminder.
+            if !mapping.syncSomeday, task.inSomeday, link.fingerprint.thingsSomeday == false {
+                deleteReasons[link.id] = "its Things to-do moved to Someday"
+                parkAfterDelete.insert(link.id)
+                queueDelete(mapping.id, link.id, .deleteReminder(reminder.id), title)
+                return
+            }
+        }
         if link.repeatMode == .reminderRepeats, link.awaitingReplacement, source != .things, let m = activeById[rm] {
             await finishReplacement(link, reminder: reminder, task: task, mapping: m)
             return
@@ -667,7 +692,8 @@ final class SyncPass {
         case .reminderRepeats, nil:
             // (One way from Things a `.reminderRepeats` pair merges as a plain one: the reminder moving on is a
             // change on the receiving side.)
-            plan = merge(base: link.fingerprint, reminder: reminder, task: task, group: groupInput, mapping: mapping)
+            plan = merge(base: link.fingerprint, reminder: reminder, task: task, group: groupInput, mapping: mapping,
+                         plain: link.repeatMode == nil)
         }
         if let destination {
             if movedReminder { plan.reminderPatch.listId = destination.id }
@@ -801,6 +827,12 @@ final class SyncPass {
         }
     }
 
+    /// True when `due` is today at or after the list's `eveningFromHour`.
+    func eveningQualifies(_ due: DueDate?, _ m: ListMapping) -> Bool {
+        guard let from = m.eveningFromMinutes, let due, let minutes = due.minutes else { return false }
+        return due.day == days.day(Date()) && minutes >= from
+    }
+
     /// Puts the list's `alwaysTag` on a to-do that was just linked through it. A failure is logged and not retried.
     func addAlwaysTag(to t: ThingsTask, mapping m: ListMapping) async {
         guard let tag = alwaysTagIds[m.id], !t.tagIds.contains(tag) else { return }
@@ -850,26 +882,38 @@ final class SyncPass {
     /// field only the receiver changed is left alone on both sides and the fingerprint keeps the source's value, so
     /// the receiver's edit stays until the source changes that field. On a first link a source with no value (no due
     /// date, not completed, no section) leaves the receiver's value alone.
+    /// `plain` is true for a pair that does not repeat: only then do the list's `dueMapsTo` and `eveningFromHour` apply.
     func merge(base: Fingerprint?, reminder r: ReminderItem, task t: ThingsTask, group: GroupInput? = nil,
-               mapping: ListMapping? = nil) -> MergePlan {
+               mapping: ListMapping? = nil, plain: Bool = false) -> MergePlan {
         let source = mapping?.direction.source
-        let rf = Fingerprint(reminder: r, days: days)
+        var rf = Fingerprint(reminder: r, days: days)
         var tf = Fingerprint(things: t, days: days)
+        // `dueMapsTo` "deadline": the due date is the Things deadline, compared by day. The When is not read or written.
+        let deadlineMode = plain && mapping?.dueMapsTo == .deadline
+        if deadlineMode {
+            rf.due = r.due.map { DueDate(day: $0.day) }
+            tf.due = t.deadline.map { DueDate(day: $0) }
+        }
+        // The stored due date means something only in the mode it was agreed in. After a change of mode the date is
+        // settled as on a first link: a missing date never replaces a real one.
+        let dueBase = base.flatMap { ($0.dueIsDeadline ?? false) == deadlineMode ? $0 : nil }
         // A to-do created in Today for a reminder with no due date: its start day is not a due date while it is as created.
         var undatedDay: String?
-        if let day = base?.undatedThingsDay, base?.due == nil, t.startDate == day, t.reminderSeconds == nil { tf.due = nil; undatedDay = day }
+        if !deadlineMode, let day = dueBase?.undatedThingsDay, dueBase?.due == nil, t.startDate == day, t.reminderSeconds == nil {
+            tf.due = nil; undatedDay = day
+        }
         var plan = MergePlan(fingerprint: rf)
         let firstLink = base == nil
 
         func decide(_ field: String, _ time: SyncField, equal: Bool, rChanged: Bool, tChanged: Bool, tiebreak: Side? = nil,
-                    sourceEmpty: Bool = false) -> Side? {
+                    sourceEmpty: Bool = false, fresh: Bool = false) -> Side? {
             if equal { return nil }
             if let source {
-                return (source == .reminders ? rChanged : tChanged) && !(firstLink && sourceEmpty) ? source : nil
+                return (source == .reminders ? rChanged : tChanged) && !((firstLink || fresh) && sourceEmpty) ? source : nil
             }
             if rChanged && !tChanged { return .reminders }
             if tChanged && !rChanged { return .things }
-            if base != nil { plan.conflicts.append(field) }
+            if base != nil, !fresh { plan.conflicts.append(field) }
             return tiebreak ?? laterSide(time, r, t)
         }
 
@@ -889,17 +933,38 @@ final class SyncPass {
         }
         // Due date. On first link a missing date never overrides a real one ("no due date" rule).
         var dueTiebreak: Side?
-        if base == nil { if rf.due == nil { dueTiebreak = .things } else if tf.due == nil { dueTiebreak = .reminders } }
+        if dueBase == nil { if rf.due == nil { dueTiebreak = .things } else if tf.due == nil { dueTiebreak = .reminders } }
         let dueSide = decide("due date", .due, equal: rf.due == tf.due,
-                             rChanged: base.map { rf.due != $0.due } ?? true,
-                             tChanged: base.map { tf.due != $0.due } ?? true, tiebreak: dueTiebreak,
-                             sourceEmpty: (source == .reminders ? rf.due : tf.due) == nil)
+                             rChanged: dueBase.map { rf.due != $0.due } ?? true,
+                             tChanged: dueBase.map { tf.due != $0.due } ?? true, tiebreak: dueTiebreak,
+                             sourceEmpty: (source == .reminders ? rf.due : tf.due) == nil, fresh: base != nil && dueBase == nil)
         switch dueSide {
-        case .reminders: plan.thingsPatch.when = .some(r.due); plan.fingerprint.due = rf.due
-        case .things: plan.reminderPatch.due = .some(t.due); plan.fingerprint.due = tf.due
+        case .reminders:
+            if deadlineMode { plan.thingsPatch.deadline = .some(rf.due?.day) } else { plan.thingsPatch.when = .some(r.due) }
+            plan.fingerprint.due = rf.due
+        case .things:
+            // A deadline has no time: the reminder keeps the time it has, on the new day.
+            if deadlineMode { plan.reminderPatch.due = .some(tf.due.map { DueDate(day: $0.day, minutes: r.due?.minutes) }) }
+            else { plan.reminderPatch.due = .some(t.due) }
+            plan.fingerprint.due = tf.due
         case nil: if source == .things { plan.fingerprint.due = tf.due }
         }
+        plan.fingerprint.dueIsDeadline = deadlineMode ? true : nil
         plan.fingerprint.undatedThingsDay = plan.fingerprint.due == nil ? undatedDay : nil
+        // This Evening (`eveningFromHour`): settled once per due date, and never for a date Things chose.
+        plan.fingerprint.eveningFor = base?.eveningFor
+        if plain, !deadlineMode, source != .things, let m = mapping, m.eveningFromMinutes != nil {
+            if dueSide == .things {
+                plan.fingerprint.eveningFor = eveningQualifies(t.due, m) ? t.due : nil
+            } else if !eveningQualifies(r.due, m) {
+                plan.fingerprint.eveningFor = nil
+            } else if base?.eveningFor != r.due, !r.completed, t.status == .open,
+                      dueSide == .reminders || (rf.due == tf.due && t.startDate == r.due?.day) {
+                if !t.evening { plan.thingsPatch.evening = true }
+                plan.fingerprint.eveningFor = r.due
+            }
+        }
+        plan.fingerprint.thingsSomeday = t.inSomeday
         // Completion
         let compSide = decide("completion", .completion, equal: !Fingerprint.completionDiffers(rf, tf),
                               rChanged: base.map { Fingerprint.completionDiffers(rf, $0) } ?? true,
@@ -980,6 +1045,9 @@ final class SyncPass {
                 return snapshot.tasks[id]
             }
             .filter { ($0.status == .open || allowCompleted) && !Fingerprint.normalize($0.title).isEmpty }
+            // A to-do in Someday is kept out of Reminders when the list says so, and a canceled one is not copied to a
+            // list that deletes the reminders of canceled to-dos.
+            .filter { (m.syncSomeday || !$0.inSomeday) && !(m.canceledBecomes == .deleted && $0.status == .canceled) }
             .sorted { ($0.creationDate ?? .distantPast, $0.id) < ($1.creationDate ?? .distantPast, $1.id) }
             let reminderPool = remindersById.values
                 .filter { $0.listId == m.id && !linkedReminders.contains($0.id) && !store.detachedReminderIds.contains($0.id) }
@@ -1020,7 +1088,7 @@ final class SyncPass {
         if sectionsActive(m) {
             groupInput = GroupInput(things: thingsGroup(t, m), reminders: r.section, remindersReadOnly: groceryLists.contains(r.listId))
         }
-        var plan = merge(base: nil, reminder: r, task: t, group: groupInput, mapping: m)
+        var plan = merge(base: nil, reminder: r, task: t, group: groupInput, mapping: m, plain: true)
         if let tag = alwaysTagIds[m.id], !t.tagIds.contains(tag) { plan.thingsPatch.addTagIds = (plan.thingsPatch.addTagIds ?? []) + [tag] }
         enforceDirection(&plan, source: m.direction.source)
         do {
@@ -1058,14 +1126,26 @@ final class SyncPass {
         do {
             let (placement, tags) = try await thingsPlacement(for: m, group: group)
             let fields = thingsFields(from: r, mapping: m)
-            let start = arrival(of: r, in: m)
+            var start = arrival(of: r, in: m)
+            var deadline: String?
+            if m.dueMapsTo == .deadline, let due = r.due {
+                // The due date is the deadline, and the to-do starts where a reminder with no due date would.
+                deadline = due.day
+                var undated = r
+                undated.due = nil
+                start = arrival(of: undated, in: m)
+            }
+            let evening = deadline == nil && !r.completed && eveningQualifies(r.due, m)
             let draft = ThingsTodoDraft(title: r.title, notes: fields.notes, when: start.when, completed: r.completed,
                                         completionDate: r.completionDate, placement: placement,
                                         tagIds: tags + fields.tagIds.filter { !tags.contains($0) }, checklist: fields.checklist,
-                                        someday: start.someday)
+                                        someday: start.someday, deadline: deadline, evening: evening)
             let id = try await things.createTodo(draft)
             var fp = fingerprint(forNewThingsFrom: r, group: group, fields: fields)
             fp.undatedThingsDay = start.undatedDay
+            if m.dueMapsTo == .deadline { fp.due = r.due.map { DueDate(day: $0.day) }; fp.dueIsDeadline = true }
+            if evening { fp.eveningFor = r.due }
+            fp.thingsSomeday = start.someday && start.when == nil && !r.completed
             store.links.append(LinkRecord(reminderId: r.id, reminderExternalId: r.externalId, thingsId: id, mappingId: m.id,
                                           fingerprint: fp, copySide: .things, copiedCompleted: r.completed))
             report.createdInThings += 1
@@ -1085,10 +1165,16 @@ final class SyncPass {
         let group = active ? thingsGroup(t, m) : nil
         let wanted = groceryLists.contains(m.id) ? nil : group
         do {
-            let (r, copied) = try await createReminderCopy(from: t, mapping: m, due: t.due, completed: done,
+            let deadlineMode = m.dueMapsTo == .deadline
+            let due = deadlineMode ? t.deadline.map { DueDate(day: $0) } : t.due
+            let (r, copied) = try await createReminderCopy(from: t, mapping: m, due: due, completed: done,
                                                            completionDate: done ? t.stopDate : nil, section: wanted)
             var fingerprint = copied
             fingerprint.group = Fingerprint.cleanGroup(group)
+            if deadlineMode { fingerprint.due = due; fingerprint.dueIsDeadline = true }
+            // Things chose this date, so the This Evening rule leaves the to-do where it is.
+            else if eveningQualifies(due, m) { fingerprint.eveningFor = due }
+            fingerprint.thingsSomeday = t.inSomeday
             if done, !r.completed {
                 // The reminder exists but could not be completed: record it as open, so the next pass completes it.
                 fingerprint.completed = false; fingerprint.completionDay = nil
@@ -1157,7 +1243,10 @@ final class SyncPass {
         if !store.ownedThings.isEmpty, let fresh = try? await things.refresh() {
             snapshot = fresh.snapshot
             let paused = config.pausedListIds
+            // A tag made for a reminder tag (`createMissingTags`) stays while a reminder still carries that tag.
+            let reminderTags = config.createMissingTags ? Set(remindersById.values.flatMap(\.tags).map(TagEnvironment.key)) : []
             for entry in store.ownedThings where !paused.contains(entry.mappingId) {   // a paused list is left alone
+                if entry.kind == .tag, reminderTags.contains(TagEnvironment.key(entry.title)) { continue }
                 await removeOwnedIfEmpty(entry.kind, id: entry.id,
                                          why: entry.kind == .heading ? "it held no to-dos" : "no list syncs to it and it is empty")
             }
@@ -1211,7 +1300,12 @@ final class SyncPass {
                     case .deleteReminder(let id):
                         try await reminders.delete(id: id)
                         report.deletedInReminders += 1
-                        log(.change, "Deleted reminder \"\(item.title)\" (Things to-do was deleted)")
+                        log(.change, "Deleted reminder \"\(item.title)\" (\(deleteReasons[item.linkId] ?? "Things to-do was deleted"))")
+                        if parkAfterDelete.contains(item.linkId), let link = store.links.first(where: { $0.id == item.linkId }) {
+                            // Parked with its to-do, so nothing pairs or copies the to-do while it is in Someday.
+                            store.parkedLinks.append(link)
+                            store.detachedThingsIds.insert(link.thingsId)
+                        }
                     }
                     removedLinks.insert(item.linkId)
                 } catch {

@@ -170,6 +170,10 @@ public actor ThingsCloudClient: ThingsBackend {
             if let rule = draft.recurrence {
                 // A repeating TEMPLATE only. Things generates the occurrences itself.
                 guard let first = draft.when else { throw ThingsCloudError.invalidChange(["a repeating template needs a first occurrence day"]) }
+                // Neither this client nor the JavaScript one writes a template with a deadline or in This Evening.
+                guard draft.deadline == nil, !draft.evening else {
+                    throw ThingsCloudError.invalidChange(["a repeating template cannot be created with a deadline or in This Evening"])
+                }
                 guard let rr = ThingsRepeat.rr(for: rule, start: first.day) else {
                     throw ThingsCloudError.invalidChange(["the repeat rule has no verified Things shape"])
                 }
@@ -180,7 +184,7 @@ public actor ThingsCloudClient: ThingsBackend {
                 try await commit([id: change].merging(checklistCreates(taskId: id, draft.checklist, startIndex: 0)) { $1 })
                 return id
             }
-            let scheduling: [String: JSONValue]
+            var scheduling: [String: JSONValue]
             if draft.when == nil, draft.someday {
                 scheduling = ThingsChanges.somedayScheduling
             } else if draft.when == nil, case .inbox = draft.placement {
@@ -188,10 +192,19 @@ public actor ThingsCloudClient: ThingsBackend {
             } else {
                 scheduling = try ThingsChanges.scheduling(draft.when, today: today())
             }
+            if draft.evening {
+                // This Evening, as the JavaScript client writes `when: "evening"`: `st` 1, `sb` 1, `sr` = `tir` = today.
+                guard draft.when?.day == today() else {
+                    throw ThingsCloudError.invalidChange(["This Evening needs today as the start day"])
+                }
+                scheduling["sb"] = 1
+            }
+            var extra: [String: JSONValue] = [:]
+            if let deadline = draft.deadline { extra["dd"] = .number(try ThingsDates.timestamp(forDay: deadline)) }
             let change = ThingsChanges.taskCreate(
                 title: draft.title, notes: draft.notes, type: 0, scheduling: scheduling,
                 containers: ThingsChanges.containers(draft.placement), tags: draft.tagIds,
-                completed: draft.completed, completionDate: draft.completionDate, now: now())
+                completed: draft.completed, completionDate: draft.completionDate, now: now(), extra: extra)
             try await commit([id: change].merging(checklistCreates(taskId: id, draft.checklist, startIndex: 0)) { $1 })
             return id
         }
@@ -280,6 +293,21 @@ public actor ThingsCloudClient: ThingsBackend {
         }
         if let when = patch.when {
             p.merge(try ThingsChanges.schedulingUpdate(when, today: today(), current: current)) { $1 }
+        }
+        if patch.evening == true {
+            // This Evening, as the JavaScript client writes `when: "evening"` on an update: `st` 1, `sb` 1 and
+            // `sr` = `tir` = today. Only for a plain to-do that starts today (now, or through this patch's `when`).
+            let day = patch.when == nil ? current.startDate : (patch.when ?? nil)?.day
+            guard current.kind == .todo, !row.hasRule, let day, day == today() else {
+                throw ThingsCloudError.invalidChange(["This Evening needs a to-do that starts today"])
+            }
+            let ts = try ThingsDates.timestamp(forDay: day)
+            p["st"] = 1; p["sb"] = 1; p["sr"] = .number(ts); p["tir"] = .number(ts)
+        }
+        if let deadline = patch.deadline {
+            // `dd` alone, as the JavaScript client's update writes it: midnight UTC of the day, or null.
+            guard !row.hasRule else { throw ThingsCloudError.invalidChange(["the deadline of a repeating template is not written"]) }
+            p["dd"] = try deadline.map { .number(try ThingsDates.timestamp(forDay: $0)) } ?? .null
         }
         if let completed = patch.completed {
             if completed {

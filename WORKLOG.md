@@ -1,5 +1,44 @@
 # Worklog
 
+## 2026-11-09: six optional native field mappings in the engine
+
+Engine and client work, no UI. Tests: `swift test --parallel`, 399 passing (was 361). Nothing was run against the
+real apps, RemCTL or Things Cloud, and nothing was committed. Details are in `docs/SPEC.md`, "Native field
+mappings"; the tests are in `EngineNativeFieldTests.swift` and `ThingsCloudNativeFieldTests.swift`.
+
+Every key is optional in `config.json` and defaults to the old behavior. Per list: `dueMapsTo`,
+`eveningFromHour`, `canceledBecomes`, `syncSomeday`. Global: `priorityTag`, `createMissingTags`.
+
+- `dueMapsTo: deadline` maps the due date to the Things deadline and leaves the When alone. The due time stays in
+  Reminders. Repeating pairs keep the When. A list that changes mode settles each date once as on a first link.
+- `priorityTag` maps priority high to an existing tag by the flag's rule. `ReminderItem` and `ReminderPatch`
+  gained `priority`; RemCTL reads it from the export and writes the plain `priority` argument.
+- `eveningFromHour` puts a reminder due today at or after the hour in This Evening, once per due date.
+- `canceledBecomes: deleted` and `syncSomeday: false` remove a reminder through `pendingDeletes`, so the safety
+  limit holds. The Someday case parks the link until the to-do leaves Someday.
+- `createMissingTags` creates a Things tag for a reminder tag that has none and records it in the ledger.
+
+New Things shapes in the Swift client, each copied from the JavaScript client and covered by the validator: a
+deadline (`dd`) on create and update, and This Evening (`st` 1, `sb` 1, `sr` = `tir` = today) on create and
+update. The `Tag4` create was already there. The client refuses This Evening for any day but today.
+
+Decisions worth knowing:
+
+- The two reminder-removing options are deletions, so they need deletes to be propagated for the list and do
+  nothing in a list that is one-way from Reminders or on the first pass after a pause.
+- Only a move to Someday that the app saw happen removes a reminder (`thingsSomeday` in the fingerprint). This is
+  what keeps `undatedArriveAs: someday` from deleting the reminder it was just created from.
+- A tag added in Things sets priority high even when the reminder was low or medium. Low and medium are never
+  written otherwise.
+- A date chosen in Things is never moved to This Evening by the app.
+- The ledger cleanup keeps an app-created tag while any reminder still carries a tag of that title. Without that,
+  a tag no to-do ended up carrying would be removed and created again on every full pass.
+- Four fingerprint fields were added (`dueIsDeadline`, `priorityHigh`, `eveningFor`, `thingsSomeday`); old
+  `links.json` files decode with them absent.
+
+Not verified: the deadline and This Evening writes against the real Things apps, and the `priority` argument
+against a real RemCTL. The shapes match the JavaScript client and RemCTL's published tool schema.
+
 ## 2026-11-09: second repeat samples matched, and per-list preferences in the engine
 
 Two pieces of engine work, no UI. Tests: `swift test --parallel`, 361 passing (was 319). Nothing was run against

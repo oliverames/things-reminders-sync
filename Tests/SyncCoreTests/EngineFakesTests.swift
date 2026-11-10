@@ -97,6 +97,7 @@ actor FakeThings: ThingsBackend {
         case .heading(let h): t.headingId = h
         }
         if let w = d.when { t.startDate = w.day; t.reminderSeconds = w.reminderSeconds } else if d.someday { t.start = .someday }
+        t.deadline = d.deadline; t.evening = d.evening
         if d.completed { t.status = .completed; t.stopDate = d.completionDate ?? Date() }
         tasks[id] = t
         return id
@@ -111,9 +112,12 @@ actor FakeThings: ThingsBackend {
         if let v = p.title { t.title = v }
         if let v = p.notes { t.notes = v }
         if let w = p.when {
+            if w?.day != t.startDate { t.evening = false }   // This Evening belongs to the day
             t.startDate = w?.day; t.reminderSeconds = w?.reminderSeconds
             if w == nil { t.start = .anytime }
         }
+        if p.evening == true { t.evening = true }
+        if let d = p.deadline { t.deadline = d }
         if let c = p.completed { t.status = c ? .completed : .open; t.stopDate = c ? (p.completionDate ?? Date()) : nil }
         if let pl = p.placement {
             t.projectId = nil; t.areaId = nil; t.headingId = nil
@@ -260,6 +264,7 @@ actor FakeReminders: RemindersBackend {
         guard var r = items[id] else { throw NSError(domain: "fake", code: 1) }
         if let u = p.url, !ignoresURL { r.url = u }
         if let f = p.flagged, !ignoresFlag { r.flagged = f }
+        if let pr = p.priority { r.priority = pr }
         if let t = p.tags { r.tags = t }
         if let titles = p.addSubtasks, !ignoresSubtasks {
             for title in titles { subtaskCounter += 1; r.subtasks.append(ReminderSubtask(id: "S\(subtaskCounter)", title: title)) }

@@ -245,6 +245,8 @@ public actor RemCTLReminders: RemindersBackend {
             guard let numericList = Int(listId) else { throw RemCTLError.tool("Reminders list not found") }
             fields["list_id"] = .number(Double(numericList))
         }
+        // Priority is a plain field: "high", "medium", "low" or "none".
+        if let priority = patch.priority { fields["priority"] = .string(priority.rawValue) }
         // Rich link, flag, tags and subtasks are private metadata writes. Without `private` RemCTL would append the
         // link to the notes, so `private` always travels with them. A rich link can only be added, never replaced or
         // cleared (viticci/remctl#79); the engine only sends one for a reminder that has none.
@@ -325,6 +327,7 @@ public actor RemCTLReminders: RemindersBackend {
         if let title = patch.title, now.title != title { return false }
         if let notes = patch.notes, now.notes != notes { return false }
         if let due = patch.due, now.due != due { return false }
+        if let priority = patch.priority, now.priority != priority { return false }
         if let recurrence = patch.recurrence {
             if let rule = recurrence { if now.recurrence?.key != rule.key { return false } } else if now.isRepeating { return false }
         }
@@ -521,6 +524,7 @@ public actor RemCTLReminders: RemindersBackend {
         var url: String?
         var tags: [String]
         var flagged: Bool
+        var priority: ReminderPriority
         /// `get_reminder` only (the export does not list alarms): the reminder has at least one alarm of any kind.
         var hasAlarms: Bool
 
@@ -544,6 +548,8 @@ public actor RemCTLReminders: RemindersBackend {
             url = json["url"]?.string.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
             tags = (json["tags"]?.array ?? []).compactMap(\.string)
             flagged = json["flagged"]?.flag ?? false
+            // "none", "low", "medium" or "high"; anything else reads as none.
+            priority = json["priority"]?.string.flatMap(ReminderPriority.init(rawValue:)) ?? .none
             deepLink = json["deepLink"]?.string
             section = json["section"]?.string
         }
@@ -703,7 +709,7 @@ public actor RemCTLReminders: RemindersBackend {
                      due: row.due, completed: row.completed, completionDate: row.completionDate,
                      lastModified: nil, isRepeating: row.isRepeating, section: section, recurrence: row.recurrence,
                      url: row.url, tags: row.tags, flagged: row.flagged, subtasks: subtasks,
-                     parentId: row.parentId.map(String.init))
+                     parentId: row.parentId.map(String.init), priority: row.priority)
     }
 
     static func contentHash(_ item: ReminderItem) -> String {
@@ -716,6 +722,7 @@ public actor RemCTLReminders: RemindersBackend {
         if let url = item.url { parts.append("url:" + url) }
         if !item.tags.isEmpty { parts.append("tags:" + item.tags.sorted().joined(separator: ",")) }
         if item.flagged { parts.append("flagged") }
+        if item.priority != .none { parts.append("priority:" + item.priority.rawValue) }
         // Subtasks are left out on purpose: `get_reminder` rows do not list them, and the stamp only decides which side's
         // edit is newer; subtasks merge without it.
         return sha(parts.joined(separator: "\u{1F}"))

@@ -81,15 +81,16 @@ You can change a list's mode or target later. The app moves the items it linked 
 | Title | Title | |
 | Notes (plain text) | Notes (Markdown) | Things keeps the Markdown, and Reminders gets a readable plain version. The Things notes change only when you edit the notes in Reminders, and that edit replaces them with the plain text, so the Markdown of that note is lost. |
 | Rich link | A link on the last line of the notes | Things shows it as a clickable link. |
-| Due date and time | When date and reminder time | |
-| Completed | Completed | Canceled in Things counts as completed in Reminders. |
+| Due date and time | When date and reminder time | A list can map the due date to the Things deadline instead (`dueMapsTo`), and can send reminders due this evening to This Evening (`eveningFromHour`). See the per-list settings. |
+| Completed | Completed | Canceled in Things counts as completed in Reminders, unless the list's `canceledBecomes` is `deleted`. |
 | Repeat rule | Repeat rule | Daily, weekly, monthly and yearly rules, including nth weekdays, the last day of the month, and end conditions. |
 | Flag | Your **Important** tag | The tag name is `flaggedTagTitle` in `config.json`. Settings has no control for it yet. |
-| Tags | Tags with the same name | Only tags that already exist in Things, matched without regard to case. The app never creates a tag for this. The only tag it ever creates is the target of a tag-mode list you save as "New…". |
+| Priority high | A tag you choose | Off until you set `priorityTag` in `config.json`. See "More options" below. |
+| Tags | Tags with the same name | Only tags that already exist in Things, matched without regard to case. The app never creates a tag for this unless you turn on `createMissingTags`. The only tag it ever creates is the target of a tag-mode list you save as "New…". |
 | Subtasks | Checklist items | Both ways: adding, renaming, completing or removing one changes the other. Set `syncChecklists` to `false` in `config.json` to stop writing checklists in Things. |
 | Section | Heading | In project mode. |
 
-Fields that only one app has stay put and are never cleared. That covers priority, urgent, early reminders, location alarms, images and assignees in Reminders, and deadlines and This Evening in Things. Every update carries only the fields that changed. A due date change leaves a reminder's other alerts alone, and a new time on the same day leaves a to-do in This Evening. Moving a to-do to another day takes it out of This Evening, because This Evening belongs to today.
+Fields that only one app has stay put and are never cleared. That covers priority (unless you set `priorityTag`), urgent, early reminders, location alarms, images and assignees in Reminders, and deadlines (unless a list maps the due date to them) and This Evening in Things. Every update carries only the fields that changed. A due date change leaves a reminder's other alerts alone, and a new time on the same day leaves a to-do in This Evening. Moving a to-do to another day takes it out of This Evening, because This Evening belongs to today.
 
 A reminder that is due all day and has an alert on that day shows a time in Reminders, so it syncs as due at that time.
 
@@ -144,6 +145,19 @@ Each list can also carry its own settings. Settings has no controls for them yet
 | `alwaysTag` | none | The name of a Things tag to put on every to-do linked through this list. The tag has to exist already. The app adds it when it creates or links the to-do, never removes it, and never copies it to Reminders. A `thingsToReminders` list ignores it, because the app doesn't write to Things there. |
 | `includeCompletedOnFirstLink` | follows the global setting | `true` or `false` for this list only. |
 | `syncChecklists` | follows the global setting | `true` or `false` for this list only. |
+| `dueMapsTo` | `when` | `deadline` makes a reminder's due date the to-do's deadline. The to-do's When is then left alone in both directions, and a new to-do starts where `undatedArriveAs` says. Changing or clearing the deadline in Things changes or clears the due date, and the other way round. A due time has no place in a deadline, so it stays in Reminders. Repeating items in the list still use the When. |
+| `eveningFromHour` | none | An hour from 0 to 23. A reminder due today at or after that hour arrives in This Evening, and a linked to-do moves there when its reminder's due date changes to this evening. The app does this once per due date, so a to-do you move back to Today stays there. Nothing changes from Things to Reminders, and a date you set in Things is left where you put it. Ignored when `dueMapsTo` is `deadline`. |
+| `canceledBecomes` | `completed` | `deleted` deletes the reminder when you cancel its to-do in Things, instead of completing it. It counts as a deletion: it respects `propagateDeletes` and the deletion safety limit, and a list that is one-way from Reminders ignores it. A to-do you only complete still completes the reminder. |
+| `syncSomeday` | `true` | `false` keeps Someday out of Reminders. A to-do in Someday gets no reminder. A linked to-do you move to Someday has its reminder deleted (again respecting `propagateDeletes` and the safety limit), and when it leaves Someday the reminder is made again. A reminder is still copied to Things as before, including one that arrives in Someday. |
+
+### More options
+
+These apply to every list and also go in `config.json`.
+
+| Key | Default | What it does |
+|---|---|---|
+| `priorityTag` | none | The name of a Things tag that stands for priority high, the way `flaggedTagTitle` stands for the flag. A high-priority reminder gets the tag, and a to-do with the tag makes its reminder high priority. Taking the tag off sets the priority to none. Low and medium are never synced, and lowering a reminder from high only removes the tag. The tag has to exist already, and it can't be the same tag as `flaggedTagTitle`. |
+| `createMissingTags` | `false` | When `true`, a reminder tag that Things has no tag for is created in Things and then synced. The app remembers that it made the tag, and removes it again once nothing uses it. It never creates the tags named by `alwaysTag`, `flaggedTagTitle` or `priorityTag`. |
 
 Your Things Cloud password is stored in the macOS Keychain.
 

@@ -39,6 +39,19 @@ public struct Fingerprint: Codable, Hashable, Sendable {
     /// start day it was given. While the to-do still starts on that day with no time and the reminder has no due
     /// date, that day is not a due date and is not copied to Reminders. Cleared as soon as either side changes its date.
     public var undatedThingsDay: String? = nil
+    // Native field mappings (docs/SPEC.md). All nil on links saved before them.
+    /// True when `due` is the Things deadline (`ListMapping.dueMapsTo` "deadline"): then it holds the day only. A
+    /// pair whose list changed mode settles its date again as on a first link.
+    public var dueIsDeadline: Bool? = nil
+    /// Whether both sides agreed the reminder has priority "high" (Things: carries `SyncConfig.priorityTag`).
+    public var priorityHigh: Bool? = nil
+    /// The due date for which the This Evening rule (`ListMapping.eveningFromHour`) was last settled: applied, or
+    /// left alone because Things chose the date. The rule runs once per due date, so a to-do moved out of This
+    /// Evening by hand stays out.
+    public var eveningFor: DueDate? = nil
+    /// Whether the to-do was in Someday when last seen. Only a move seen from false to true removes the reminder of
+    /// a list whose `syncSomeday` is off.
+    public var thingsSomeday: Bool? = nil
 
     public struct ChecklistEntry: Codable, Hashable, Sendable {
         public var title: String
@@ -90,6 +103,8 @@ public struct Fingerprint: Codable, Hashable, Sendable {
 // MARK: - Mapping helpers (Things start date + reminder time <-> DueDate)
 
 extension ThingsTask {
+    /// An open to-do in Someday: `st` 2 with no start day. (A repeating template has the same keys and is not one.)
+    public var inSomeday: Bool { kind == .todo && status == .open && start == .someday && startDate == nil && !isTemplate }
     /// Things "When" day plus reminder time, as a shared `DueDate`. Items without a start date have no due date.
     public var due: DueDate? {
         guard let day = startDate else { return nil }

@@ -37,6 +37,10 @@ struct PerListConfigTests {
         let m = try #require(config.mappings.first)
         #expect(m.direction == .twoWay && !m.paused && m.propagateDeletes == nil && m.undatedArriveAs == .anytime)
         #expect(m.alwaysTag == nil && m.includeCompletedOnFirstLink == nil && m.syncChecklists == nil)
+        // The native field mappings: each default is the behavior before the key existed.
+        #expect(m.dueMapsTo == .when && m.eveningFromHour == nil && m.canceledBecomes == .completed && m.syncSomeday)
+        #expect(config.priorityTag == nil && !config.createMissingTags)
+        #expect(config == SyncConfig(mappings: [m]), "the same config as before the keys existed")
         #expect(m == ListMapping(id: "7", listTitle: "Home", targetId: "P1", targetTitle: "Home"), "the same mapping as before the preferences existed")
         #expect(m.isLive && config.watchedListIds == ["7"] && config.sectionListIds == ["7"])
     }

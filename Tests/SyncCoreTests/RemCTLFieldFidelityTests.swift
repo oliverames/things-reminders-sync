@@ -81,6 +81,26 @@ import Testing
         #expect(await fake.calls("get_reminder").count == 1)
     }
 
+    @Test func priorityIsReadFromTheExportAndWrittenAsAPlainField() async throws {
+        let fake = FakeRemCTL()
+        await fake.put(FakeRemCTL.row(5, "High", ["priority": "high"]))
+        await fake.put(FakeRemCTL.row(6, "Medium", ["priority": "medium"]))
+        await fake.put(FakeRemCTL.row(7, "None", ["priority": "none"]))
+        await fake.put(FakeRemCTL.row(8, "Missing"))
+        let backend = makeBackend(fake)
+        let items = try await backend.reminders(inLists: ["1"]).sorted { $0.id < $1.id }
+        #expect(items.map(\.priority) == [.high, .medium, .none, .none])
+        let item = try await backend.update(id: "5", patch: ReminderPatch(priority: ReminderPriority.none))
+        let args = try #require(await fake.calls("update_reminder").first)
+        #expect(args["priority"] == "none" && args["private"] == nil)
+        #expect(item.priority == .none)
+        #expect(try await backend.update(id: "8", patch: ReminderPatch(priority: .high)).priority == .high)
+        // A priority change is a change the poll notices.
+        var a = items[0], b = items[0]
+        a.priority = .high; b.priority = .none
+        #expect(RemCTLReminders.contentHash(a) != RemCTLReminders.contentHash(b))
+    }
+
     @Test func emptyTagsClearThemAndUnflagIsSent() async throws {
         let fake = FakeRemCTL()
         await fake.put(FakeRemCTL.row(5, "X", ["tags": ["A"], "flagged": true]))

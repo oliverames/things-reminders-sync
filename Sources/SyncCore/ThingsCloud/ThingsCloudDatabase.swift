@@ -151,6 +151,7 @@ struct ThingsDatabase: Sendable {
                 case .notes: return old.notes != after.notes
                 // A template's due is its next day (`tir`) until Things has made an occurrence.
                 case .due: return old.due != after.due || old.nextDay != after.nextDay || old.reminderSeconds != after.reminderSeconds
+                    || old.deadline != after.deadline   // the due date of a list whose `dueMapsTo` is "deadline"
                 case .completion: return old.status != after.status || old.stopDate != after.stopDate
                 case .placement: return old.projectId != after.projectId || old.headingId != after.headingId || old.areaId != after.areaId
                 case .tags: return old.tagIds != after.tagIds

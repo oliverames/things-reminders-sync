@@ -302,10 +302,12 @@ private func item(_ id: String, _ title: String, done: Bool = false, ix: Double 
         #expect(config.flaggedTagTitle == "Important" && config.syncChecklists == true)
         let fp = try JSONDecoder().decode(Fingerprint.self, from: Data(#"{"title":"a","notes":"n","completed":false}"#.utf8))
         #expect(fp.remindersNotes == nil && fp.url == nil && fp.flagged == nil && fp.tags == nil && fp.checklist == nil)
+        #expect(fp.dueIsDeadline == nil && fp.priorityHigh == nil && fp.eveningFor == nil && fp.thingsSomeday == nil)
         let full = Fingerprint(title: "a", notes: "n", due: nil, completed: false, completionDay: nil, remindersNotes: "m", url: "https://x.example/",
                                flagged: true, tags: ["T"], checklist: [.init(title: "c", done: true)])
         #expect(try JSONDecoder().decode(Fingerprint.self, from: JSONEncoder().encode(full)) == full)
         // Things and Reminders values saved before this change decode too.
-        _ = try JSONDecoder().decode(ReminderItem.self, from: Data(#"{"id":"1","listId":"L","title":"t","notes":"","completed":false,"isRepeating":false}"#.utf8))
+        let item = try JSONDecoder().decode(ReminderItem.self, from: Data(#"{"id":"1","listId":"L","title":"t","notes":"","completed":false,"isRepeating":false}"#.utf8))
+        #expect(item.priority == ReminderPriority.none)
     }
 }
