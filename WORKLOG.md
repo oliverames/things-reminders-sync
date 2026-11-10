@@ -1,5 +1,37 @@
 # Worklog
 
+## 2026-11-10: Dry run reads sections, held deletions in the menu
+
+Tests: `swift build` clean, `swift test --parallel`, 443 passing (was 436). Fakes only: nothing was run against the
+real apps, the app, trs-admin and remctl were not launched, and nothing was committed.
+
+- Defect from the live check: `trs-admin dry-run` built its own `RemCTLReminders` and never called
+  `setSectionLists`, which only `SyncCoordinator.applyRemindersConfig` did. Every reminder read back with no
+  section, so for an area list with `sectionsAsProjects` the plan moved sectioned to-dos into the bare area and
+  deleted the "empty" owned section. The same backend also saved `remctl-observed.json`, so a dry run rewrote the
+  app's observed stamps with section-less hashes.
+- `RemCTLReminders.apply(config)` now holds the setup (path, poll interval, watched lists, section lists) and both
+  the coordinator and the dry run call it. `RemCTLReminders(savesObservedState: false)` loads the stamps and never
+  writes them.
+- The dry run moved from `Sources/trs-admin/DryRun.swift` to `Sources/SyncCore/Engine/DryRun.swift` (`DryRun.run`,
+  `DryRunPlan`, the two recording backends) so it can be tested. It passes the saved log for the ledger backfill the
+  way the coordinator does, and later reads in the pass see the planned reminder creates, updates and deletes.
+  `trs-admin` keeps only the printing, and now also prints held deletions and the number of planned writes.
+- Held deletions: before this, the app had `SyncReport.deletionsHeld`, one log line per list, an error phase, and
+  Sync Now passing `forceDeletions`. Nothing showed counts or titles. New `HeldDeletions`
+  (`Engine/HeldDeletions.swift`) in `SyncReport.heldDeletions`; `SyncEngine.sync(forceDeletionsIn:)` lifts the limit
+  per list; `SyncCoordinator.heldDeletions`, `heldDeletions(forList:)` and `applyHeldDeletions(listId:)`.
+- UI: `MenuContent.swift` shows "N deletions waiting in LIST" and "Apply Deletions…"; `HeldDeletionsPrompt.swift`
+  holds the alert (Apply Deletions, Not Now as the default) and the Lists tab notice used in `ListsTab.swift`.
+- Behavior change: the hold now clears on a full pass without failures that finds nothing to hold (for example
+  after the items were restored). Before, the error phase stayed until Sync Now.
+- New tests in `DryRunAndHeldDeletionsTests.swift`: a settled sectioned list gives an empty plan and leaves the
+  state file untouched; the same pass without the section setup gives a non-empty plan; planned writes are recorded
+  and not sent; per-list counts, sides and titles; one confirmed list applies alone; the merge rules; the
+  coordinator from hold through Apply Deletions to Sync Now.
+- Not verified: the menu, the alert and the Lists tab notice were only compiled, not seen running, and VoiceOver
+  was not checked. The dry run was not run against real data.
+
 ## 2026-11-10: Tags with spaces, and the deletion limit on short lists
 
 Tests: `swift test --parallel`, 436 passing (was 428). Fakes only: nothing was run against the real apps, the app

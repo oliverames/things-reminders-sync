@@ -20,6 +20,19 @@ struct MenuContent: View {
             Text("Not synced yet")
         }
 
+        let held = coordinator.heldDeletions
+        if !held.isEmpty {
+            Divider()
+            ForEach(held) { item in
+                Text(item.summary)
+                Button(held.count == 1 ? "Apply Deletions…" : "Apply Deletions in \(item.listTitle)…") {
+                    HeldDeletionsPrompt.confirmAndApply(item, coordinator: coordinator)
+                }
+                .accessibilityLabel("Apply deletions in \(item.listTitle)")
+                .disabled(!canSync)
+            }
+        }
+
         Divider()
 
         Button("Sync Now") { Task { await coordinator.syncNow() } }

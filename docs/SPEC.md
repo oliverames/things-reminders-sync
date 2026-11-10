@@ -628,7 +628,14 @@ the link and leave both items alone. Never delete anything that was not linked.
 
 Safety limits: if one pass would delete or trash more than 10 items (in one mapping, or over all mappings
 together) or more than 25% of a mapping's links, skip those deletions, log an `.error`, and set phase to
-`.error` until the user runs Sync Now. The 25% rule applies only when more than 3 deletions are pending in a mapping (`fractionExemptDeletions`); 3 or fewer always go through, so 2 of 4 items in a short list are never held. The absolute limit of 10 is unchanged. Never empty the Things Trash. Never touch Reminders lists that are not mapped.
+`.error` until the deletions are applied or no longer pending. The report lists what was held per mapping
+(`SyncReport.heldDeletions`, a `HeldDeletions` each: reminders to delete, to-dos to trash, up to five titles). The
+coordinator publishes them as `heldDeletions`, merged by `HeldDeletions.merged`: a mapping held again takes its new
+entry, a full pass without failures that holds nothing clears them all, a targeted pass leaves the others alone.
+`applyHeldDeletions(listId:)` runs a full pass with `forceDeletionsIn: [listId]`, which lifts the limit for that
+mapping only and leaves its deletions out of the overall count for the others. Sync Now runs with `forceDeletions`
+while anything is held, which lifts the limit for every mapping. The held list is not saved; the first full pass
+after launch finds it again. The 25% rule applies only when more than 3 deletions are pending in a mapping (`fractionExemptDeletions`); 3 or fewer always go through, so 2 of 4 items in a short list are never held. The absolute limit of 10 is unchanged. Never empty the Things Trash. Never touch Reminders lists that are not mapped.
 
 ## Ownership ledger and cleanup
 
@@ -667,8 +674,18 @@ Cleanup, always limited to ledger entries and never to a container a mapping sti
 
 ## App
 
-- Menu bar only (`LSUIElement`). Menu: status line (phase, last sync time), Sync Now, Pause/Resume,
-  Settings…, Quit.
+- Menu bar only (`LSUIElement`). Menu: status line (phase, last sync time), then for each mapping with
+  held deletions a line "N deletions waiting in LIST" and "Apply Deletions…" (titled "Apply Deletions in LIST…" when
+  several lists are held), then Sync Now, Pause/Resume, Settings…, Quit. Apply Deletions… opens an alert with the
+  count, the side, and up to five titles; "Apply Deletions" calls `applyHeldDeletions(listId:)`, "Not Now" (the
+  default button) changes nothing. The Lists tab row of that list shows the same notice and button. Each control's
+  accessibility label names the list.
+- `trs-admin dry-run` runs `DryRun.run` (SyncCore): the engine's full pass over backends that record writes instead
+  of sending them. It must read exactly what the app's full pass reads. Both set the RemCTL backend up through
+  `RemCTLReminders.apply(config)` (path, poll interval, watched lists, section lists), so sections are read for
+  mappings that mirror them; the saved `LinkStore` supplies links, ledger, owned sections and paused mappings; the
+  observed stamps are loaded from `remctl-observed.json` and never saved (`savesObservedState: false`). Reads later
+  in the pass see the planned reminder writes. A settled state yields no planned writes.
 - Settings window tabs: **Account** (Things Cloud email/password, verify, sign out; RemCTL
   status row with a Check Again button and an optional RemCTL path), **Lists** (saving a list off asks "Keep Everything" or "Remove N synced copies…"; each list has "Remove list from sync…"; every Reminders list with an enable toggle, a mode
   picker (Project, Area, Tag, Heading), a target picker of existing Things projects/areas/tags plus "New …" with a title,

@@ -27,8 +27,8 @@ let engine = SyncEngine(things: ThingsCloudClient(email: email, password: passwo
                         reminders: RemCTLReminders(executablePath: remindersPath))
 
 if command == "dry-run" {
-    try await runDryRun(config: config, links: links, things: ThingsCloudClient(email: email, password: password),
-                        reminders: RemCTLReminders(executablePath: remindersPath))
+    try await runDryRun(config: config, links: links, log: store.loadLog(), things: ThingsCloudClient(email: email, password: password),
+                        executablePath: remindersPath)
     exit(0)
 }
 

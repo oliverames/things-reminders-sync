@@ -252,6 +252,9 @@ private struct ListRow: View {
                                 onArea: { value in edit { $0.projectAreaId = value } })
             }
             LabeledContent("Linked items", value: "\(coordinator.linkedCounts[list.id] ?? 0)")
+            if let held = coordinator.heldDeletions(forList: list.id) {
+                HeldDeletionsNotice(held: held, coordinator: coordinator)
+            }
             if current.mode == .tag {
                 Text("New items from this list land in the Things Inbox with the tag.")
                     .font(.callout).foregroundStyle(.secondary)

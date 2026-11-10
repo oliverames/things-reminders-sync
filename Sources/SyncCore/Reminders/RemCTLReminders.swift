@@ -28,6 +28,7 @@ public actor RemCTLReminders: RemindersBackend {
 
     private let transport: any RemCTLTransport
     private let stateURL: URL
+    private let savesObservedState: Bool
     private let clock: @Sendable () -> Date
     private let logger = Logger(subsystem: "com.oliverames.ThingsRemindersSync", category: "RemCTL")
 
@@ -50,13 +51,16 @@ public actor RemCTLReminders: RemindersBackend {
     private var observedLoaded = false
     private var versionDetail = "Not checked yet"
 
-    public init(executablePath: String? = nil, pollSeconds: Int = 10, stateDirectory: URL = StateStore.defaultDirectory) {
+    /// `savesObservedState: false` reads `remctl-observed.json` and never writes it (the dry run).
+    public init(executablePath: String? = nil, pollSeconds: Int = 10, stateDirectory: URL = StateStore.defaultDirectory,
+                savesObservedState: Bool = true) {
         self.init(transport: LiveRemCTLTransport(executablePath: executablePath), executablePath: executablePath,
-                  pollSeconds: Double(pollSeconds), stateDirectory: stateDirectory)
+                  pollSeconds: Double(pollSeconds), stateDirectory: stateDirectory, savesObservedState: savesObservedState)
     }
 
     init(transport: any RemCTLTransport, executablePath: String? = nil, pollSeconds: Double = 10,
-         stateDirectory: URL, clock: @escaping @Sendable () -> Date = { Date() }) {
+         stateDirectory: URL, savesObservedState: Bool = true, clock: @escaping @Sendable () -> Date = { Date() }) {
+        self.savesObservedState = savesObservedState
         self.transport = transport
         self.executablePath = executablePath
         self.pollSeconds = pollSeconds
@@ -78,6 +82,16 @@ public actor RemCTLReminders: RemindersBackend {
             self.executablePath = normalized
             await transport.setExecutablePath(normalized)
         }
+    }
+
+    /// Everything a pass needs from the settings: the RemCTL path, the poll interval, the watched lists, and the lists
+    /// whose sections are read. The app and the dry run both set the backend up through this, so they read alike.
+    public func apply(_ config: SyncConfig) async {
+        await configure(executablePath: config.remctlPath, pollSeconds: config.remindersPollSeconds)
+        // A paused list is not watched, so a change in it starts no pass.
+        setWatchedLists(config.watchedListIds)
+        // Sections are only read for the lists that mirror them.
+        setSectionLists(config.sectionListIds)
     }
 
     /// The list ids `changes()` watches. Empty means every list.
@@ -697,7 +711,7 @@ public actor RemCTLReminders: RemindersBackend {
 
     private func persistObserved() {
         loadObservedIfNeeded()
-        guard observed != lastPersisted else { return }
+        guard savesObservedState, observed != lastPersisted else { return }
         do {
             try FileManager.default.createDirectory(at: stateURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             let encoder = JSONEncoder()

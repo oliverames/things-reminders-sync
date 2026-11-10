@@ -40,6 +40,9 @@ public final class SyncCoordinator {
     /// Number of linked item pairs per Reminders list id.
     public private(set) var linkedCounts: [String: Int] = [:]
     public private(set) var config: SyncConfig = SyncConfig()
+    /// Deletions the safety limit is holding, per list. Empty when nothing waits. Not saved: the next full pass
+    /// after a launch finds them again.
+    public private(set) var heldDeletions: [HeldDeletions] = []
 
     // MARK: Dependencies (internal so tests and previews can supply fakes)
 
@@ -67,12 +70,15 @@ public final class SyncCoordinator {
     private struct PendingWork {
         var full = false
         var force = false
+        /// Lists whose held deletions the user confirmed (Apply Deletions).
+        var forceLists: Set<String> = []
         var pollThings = false
         var remindersChanged = false
         var thingsIds: Set<String> = []
         var isEmpty: Bool { !full && !pollThings && !remindersChanged && thingsIds.isEmpty }
         mutating func merge(_ o: PendingWork) {
             full = full || o.full; force = force || o.force; pollThings = pollThings || o.pollThings
+            forceLists.formUnion(o.forceLists)
             remindersChanged = remindersChanged || o.remindersChanged; thingsIds.formUnion(o.thingsIds)
         }
     }
@@ -176,6 +182,15 @@ public final class SyncCoordinator {
         await request(PendingWork(full: true, force: safetyHold))
     }
 
+    /// Runs a full pass with the deletion safety limit lifted for one list: the user confirmed that list's held
+    /// deletions. Other lists stay held. Declining needs no call; the deletions simply stay held.
+    public func applyHeldDeletions(listId: String) async {
+        await request(PendingWork(full: true, forceLists: [listId]))
+    }
+
+    /// The held deletions of one list, for its row in the Lists tab.
+    public func heldDeletions(forList listId: String) -> HeldDeletions? { heldDeletions.first { $0.mappingId == listId } }
+
     public func pause() {
         userPaused = true
         stopObservers()
@@ -277,11 +292,7 @@ public final class SyncCoordinator {
     /// Pushes the RemCTL path, poll interval, and the enabled lists to the backend.
     private func applyRemindersConfig() async {
         guard let remctl = deps.remctl else { return }
-        await remctl.configure(executablePath: config.remctlPath, pollSeconds: config.remindersPollSeconds)
-        // A paused list is not watched, so a change in it starts no pass.
-        await remctl.setWatchedLists(config.watchedListIds)
-        // Sections are only read for project-mode lists that mirror them as headings.
-        await remctl.setSectionLists(config.sectionListIds)
+        await remctl.apply(config)
     }
 
     private func refreshRemindersDetail() async {
@@ -416,8 +427,8 @@ public final class SyncCoordinator {
             let engine = SyncEngine(things: things, reminders: deps.reminders)
             let startedWith = config
             let report = try await engine.sync(config: startedWith, links: links, scope: scope, forceDeletions: work.force,
-                                               backfillLog: links.ledgerBackfilled ? nil : log)
-            apply(report, startedWith: startedWith, forced: work.force)
+                                               forceDeletionsIn: work.forceLists, backfillLog: links.ledgerBackfilled ? nil : log)
+            apply(report, startedWith: startedWith, forced: work.force, forcedLists: work.forceLists, fullPass: scope == .full)
         } catch {
             let message = error.localizedDescription
             if phase != .error(message) { append([SyncLogEntry(level: .error, message: "Sync failed: \(message)")]) }
@@ -452,7 +463,7 @@ public final class SyncCoordinator {
         return pruned
     }
 
-    private func apply(_ report: SyncReport, startedWith: SyncConfig, forced: Bool) {
+    private func apply(_ report: SyncReport, startedWith: SyncConfig, forced: Bool, forcedLists: Set<String>, fullPass: Bool) {
         // The user may have edited settings while the pass ran; keep those edits and take only what
         // the engine adds (ids of targets it created). updateConfig already queued the next pass.
         let configChanged = config != startedWith
@@ -466,12 +477,14 @@ public final class SyncCoordinator {
         applyCatalog(report.snapshot)
         lastSnapshot = report.snapshot; lastReminders = report.reminders
         lastSync = Date()
-        if forced { safetyHold = false }
-        if report.deletionsHeld { safetyHold = true }
+        let live = Set(config.mappings.filter(\.isLive).map(\.id))
+        heldDeletions = HeldDeletions.merged(heldDeletions, report: report, forcedAll: forced, forcedLists: forcedLists, fullPass: fullPass)
+            .filter { live.contains($0.mappingId) }
+        safetyHold = !heldDeletions.isEmpty
         persist()
         if userPaused { phase = .paused }
         else if let failure = report.firstFailure { phase = .error(failure) }
-        else if safetyHold { phase = .error("Deletions held back by the safety limit. Choose Sync Now to apply them.") }
+        else if safetyHold { phase = .error("Deletions held back by the safety limit. Choose Apply Deletions or Sync Now to apply them.") }
         else { phase = .idle }
     }
 }

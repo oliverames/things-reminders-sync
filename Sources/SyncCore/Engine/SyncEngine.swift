@@ -27,6 +27,8 @@ public struct SyncReport: Sendable {
     public var firstFailure: String?
     /// True when the deletion safety limit held back deletions.
     public var deletionsHeld = false
+    /// What was held, per list: counts by side and a few titles.
+    public var heldDeletions: [HeldDeletions] = []
     public var log: [SyncLogEntry] = []
     public var snapshot = ThingsSnapshot()
     public var reminderLists: [ReminderList] = []
@@ -56,12 +58,14 @@ public struct SyncEngine: Sendable {
         self.things = things; self.reminders = reminders; self.timeZone = timeZone
     }
 
-    /// Runs one pass. `forceDeletions` lifts the deletion safety limit (the user acknowledged it with Sync Now).
+    /// Runs one pass. `forceDeletions` lifts the deletion safety limit (the user acknowledged it with Sync Now);
+    /// `forceDeletionsIn` lifts it for those lists only (the user confirmed Apply Deletions for them).
     /// `backfillLog` (newest first) lets a full pass infer the ownership ledger for data created before it existed
     /// (see `LedgerBackfill`); the coordinator passes it only until the one-time backfill has run.
     public func sync(config: SyncConfig, links: LinkStore, scope: SyncScope, forceDeletions: Bool = false,
-                     backfillLog: [SyncLogEntry]? = nil) async throws -> SyncReport {
-        let pass = SyncPass(engine: self, config: config, store: links, scope: scope, force: forceDeletions, backfillLog: backfillLog)
+                     forceDeletionsIn: Set<String> = [], backfillLog: [SyncLogEntry]? = nil) async throws -> SyncReport {
+        let pass = SyncPass(engine: self, config: config, store: links, scope: scope, force: forceDeletions,
+                            forcedLists: forceDeletionsIn, backfillLog: backfillLog)
         return try await pass.run()
     }
 }
@@ -112,6 +116,7 @@ final class SyncPass {
     var store: LinkStore
     let scope: SyncScope
     let force: Bool
+    let forcedLists: Set<String>
     let backfillLog: [SyncLogEntry]?
     var report: SyncReport
 
@@ -138,7 +143,9 @@ final class SyncPass {
     /// Links whose reminder is being removed because the to-do moved to Someday: parked once the deletion ran.
     var parkAfterDelete: Set<UUID> = []
 
-    init(engine: SyncEngine, config: SyncConfig, store: LinkStore, scope: SyncScope, force: Bool, backfillLog: [SyncLogEntry]?) {
+    init(engine: SyncEngine, config: SyncConfig, store: LinkStore, scope: SyncScope, force: Bool, forcedLists: Set<String> = [],
+         backfillLog: [SyncLogEntry]?) {
+        self.forcedLists = forcedLists
         things = engine.things; reminders = engine.reminders; days = DayFormatter(timeZone: engine.timeZone)
         self.config = config; self.store = store; self.scope = scope; self.force = force; self.backfillLog = backfillLog
         report = SyncReport(config: config, links: store)
@@ -1354,16 +1361,20 @@ final class SyncPass {
         // The count limit holds for the pass as a whole (three lists losing ten items each is thirty deletions) as well
         // as per list; the fraction is per list and only applies to more than `fractionExemptDeletions` deletions, so
         // deleting 2 of 4 items in a short list goes through.
-        let overall = pendingDeletes.values.reduce(0) { $0 + $1.count }
+        // Deletions the user confirmed for a list do not count against the other lists.
+        let overall = pendingDeletes.filter { !forcedLists.contains($0.key) }.values.reduce(0) { $0 + $1.count }
         for (mappingId, items) in pendingDeletes.sorted(by: { $0.key < $1.key }) {
             let total = linksAtStart.filter { $0.mappingId == mappingId }.count
             let n = items.count
-            let tripped = !force && (n > SyncEngine.maxDeletionsPerPass || overall > SyncEngine.maxDeletionsPerPass
+            let tripped = !force && !forcedLists.contains(mappingId) && (n > SyncEngine.maxDeletionsPerPass || overall > SyncEngine.maxDeletionsPerPass
                 || (n > SyncEngine.fractionExemptDeletions && Double(n) > SyncEngine.maxDeletionFraction * Double(total)))
             let listTitle = activeById[mappingId]?.listTitle ?? mappingId
             if tripped {
                 report.deletionsHeld = true
-                log(.error, "Held back \(n) deletions in \"\(listTitle)\" (\(total) linked items): over the safety limit. Run Sync Now to apply them.")
+                let trashing = items.filter { if case .trashThings = $0.action { true } else { false } }.count
+                report.heldDeletions.append(HeldDeletions(mappingId: mappingId, listTitle: listTitle, remindersToDelete: n - trashing,
+                                                          todosToTrash: trashing, titles: items.map(\.title)))
+                log(.error, "Held back \(n) deletions in \"\(listTitle)\" (\(total) linked items): over the safety limit. Choose Apply Deletions or Sync Now to apply them.")
                 continue
             }
             for item in items {
