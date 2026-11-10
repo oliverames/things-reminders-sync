@@ -19,9 +19,9 @@ actor DryRunThings: ThingsBackend {
         return fakeId("todo")
     }
     func updateTodo(id: String, patch: ThingsTodoPatch) async throws { say("update \(id): \(patch)") }
-    func stopRepeating(templateId: String) async throws -> String {
-        say("STOP repeating \(templateId): delete the template, detach its open occurrences, create a plain to-do for its next day")
-        return fakeId("todo")
+    func stopRepeating(templateId: String) async throws -> ThingsStopResult {
+        say("STOP repeating \(templateId): delete the template and its checklist items, detach its open occurrences, create a plain to-do with the same checklist for its next day")
+        return ThingsStopResult(todoId: fakeId("todo"))
     }
     func createProject(title: String, areaId: String?) async throws -> String { say("create project \"\(title)\""); return fakeId("project") }
     func createHeading(title: String, projectId: String) async throws -> String { say("create heading \"\(title)\" in \(projectId)"); return fakeId("heading") }

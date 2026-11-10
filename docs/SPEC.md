@@ -171,6 +171,97 @@ A heading target exists while it is a non-trashed task of kind heading. Sections
 Only to-dos sync: never projects or headings (checklist items sync as part of their to-do, see Field fidelity). Repeating items sync as rules (see
 "Repeating items"). Things items that are trashed are out of scope except as deletions of linked pairs.
 
+## Per-list preferences
+
+Each `ListMapping` carries the preferences below. Every key is optional in `config.json`, and its default is how
+the app behaved before the preference existed, so an old file decodes and behaves as before. Code:
+`SharedTypes.swift` (`ListMapping`, `SyncDirection`, `UndatedArrival`), `SyncEngine.swift` ("Per-list
+preferences"), `FieldFidelity.swift`. The Settings window has no controls for them yet.
+
+**`direction`**: `"twoWay"` (default), `"remindersToThings"` or `"thingsToReminders"`. In a one-way list the first
+side named is the source and the other the receiver.
+
+- The app never writes to the source: no update, create, completion, move, tag or delete. Every plan passes
+  through `enforceDirection`, which drops whatever would be written to the source. The one exception is a
+  container the app itself made: creating the target of a "New…" list, and removing an empty container from the
+  ownership ledger, still happen in Things.
+- A field is copied from source to receiver when the source's value changed since the fingerprint. This holds for
+  title, due date, completion, section or heading, notes and link, flag, each tag, each checklist item, a move to
+  another list, and a repeat rule.
+- A field only the receiver changed is ignored: nothing is written to either side, and the fingerprint keeps the
+  source's value. The receiver's edit therefore stays, pass after pass, until the source changes that same field,
+  and then the source's value replaces it. Other fields the source changes meanwhile do not touch it.
+- Completion follows the same rule. Completing on the receiver does not complete the source. Completing or
+  reopening on the source is copied.
+- Tags and checklist items are judged one by one: a tag or item added to or removed from the source is added to
+  or removed from the receiver; one the receiver gained or lost is ignored.
+- Creates flow from the source only. An item created on the receiver gets no partner and stays unlinked. Title
+  pairing still links an unlinked receiver item to an unlinked source item of the same title, because the
+  alternative is a duplicate.
+- Deletes flow from the source only, and only when deletes are propagated for the list. An item deleted on the
+  receiver is not deleted on the source and is not created again: the pair is unlinked and the source item is
+  marked so it gets no new partner.
+- First link (title pairing): the source's title, due date, completion, section, notes, flag, tags and checklist
+  are written to the receiver. A source with no value for a field (no due date, not completed, no section, empty
+  notes, not flagged) leaves the receiver's value alone. When Reminders is the source and both notes have text,
+  the Reminders notes replace the Things notes and a `.warning` names the item.
+- Moves: a move of the source item to another synced list is followed. A move of the receiver item is ignored and
+  the pair stays in the source item's list. A move of either item to an unsynced place parks the link, as in a
+  two-way list. A pair that arrives in another list follows that list's direction from the next pass.
+- Repeating pairs: with Reminders as the source, an occurrence completed or moved in Things does not change the
+  reminder, a template stopped in Things unlinks the pair, a template that lost its rule leaves the reminder
+  repeating (the to-do then stands for the current occurrence), and a to-do given a repeat in Things is not
+  followed. With Things as the source, a reminder that advanced, moved or lost its repeat changes nothing in
+  Things, the template is never stopped, and a repeat added to a reminder is ignored.
+- Retargeting: with Reminders as the source, linked to-dos move to the new target as in a two-way list. With
+  Things as the source nothing in Things is moved: pairs whose to-do is still in the old target are parked (both
+  items stay), an `.info` says so, and the new target is linked by title.
+- Teardown, the deletion safety limit and the ownership ledger work as in a two-way list.
+
+**`paused`**: `true` or `false` (default). A paused list keeps its links, parked links and ledger entries.
+
+- Passes skip it: no target is created for it, its links are not processed, nothing in it is paired, created,
+  updated, moved, retargeted or deleted, and its parked links are neither restored nor freed.
+- Polls skip it: it is not among the lists RemCTL watches for changes or reads sections for. A Things change in
+  its target can still start a pass, and that pass does nothing for the list.
+- Cleanup skips it: empty app-created headings, containers and sections recorded for it are left alone, and
+  "remove completed copies" leaves its copies alone.
+- Its pending deletions do not exist, so they do not count towards the deletion safety limit.
+- Resuming: `links.json` remembers that the list was paused (`pausedMappings`) until the first full pass without
+  failures after it resumes. Until then a pair with one item missing is never a deletion: the pair is unlinked,
+  the surviving item is kept and gets no new partner. Edits made during the pause sync by the usual rules. After
+  that pass a deletion is a deletion again.
+- An item that moves from another list into a paused list's scope has its link parked, like a move to an
+  unsynced place.
+- Stopping or removing a paused list works as for any list and clears the paused mark.
+
+**`propagateDeletes`**: `true`, `false` or absent (default). When present it replaces the global
+`propagateDeletes` for links of this list.
+
+**`undatedArriveAs`**: `"anytime"` (default), `"someday"` or `"today"`. Used only when the app creates a Things
+to-do from an open reminder that has no due date. It never changes a to-do that exists.
+
+- `anytime`: as before. Anytime (`st` 1, no date), or the Inbox (`st` 0) for a tag-mode list.
+- `someday`: `st` 2 with `sr` and `tir` null, the shape the JavaScript client writes for `when: "someday"`.
+- `today`: the dated create the app already writes, with today as the day (`st` 1, `sr` = `tir` = today). The
+  reminder gets no due date from it: the fingerprint records the day (`undatedThingsDay`), and while the to-do
+  still starts on that day with no time and the reminder has no due date, the day is not treated as a due date.
+  Moving the to-do to another day, giving it a time, or setting a due date in Reminders syncs as usual and ends
+  that.
+
+**`alwaysTag`**: a Things tag title, or absent (default). The tag must already exist (exact title first, then
+without case); the app never creates it, and logs one `.info` per full pass when it is missing.
+
+- Added to the to-do when the app creates it from a reminder (plain or repeating), when two existing items are
+  linked by title, when a reminder is created for a to-do, and when a pair moves into the list.
+- Never removed by the app. A tag taken off by hand is not put back.
+- Never synced as a tag: it is left out of tag sync for every list, like the flag tag and tag-mode targets.
+- Ignored on a `thingsToReminders` list, where the app writes nothing to Things.
+
+**`includeCompletedOnFirstLink`** and **`syncChecklists`**: `true`, `false` or absent (default). When present each
+replaces the global setting of the same name for this list. "Remove completed copies" leaves the copies of a list
+whose own `includeCompletedOnFirstLink` is `true`.
+
 ## Field mapping
 
 | Reminders | Things |
@@ -283,7 +374,9 @@ validator are in docs/RECURRENCE.md; code in `Engine/RepeatSync.swift`.
   advances (`repeatMode` `.reminderRepeats`).
 - A reminder that stops repeating stops its template with the commit Things' own Stop wrote (docs/RECURRENCE.md,
   `stopRepeating`): the template is deleted for good, its open occurrences are detached, and a plain to-do is
-  created for the template's next day. With no open occurrence the link moves to that to-do. With one, the link
+  created for the template's next day, with the template's notes, tags and checklist items (the template's own
+  checklist items are deleted in the same commit). With no open occurrence the link moves to that to-do, and the
+  agreed checklist stays agreed. With one, the link
   moves to the detached occurrence and the new to-do is trashed with an ordinary update. With several, the
   occurrence on the reminder's due day is linked when exactly one matches, otherwise the earliest; the others
   stay unlinked and get their own reminders on the next pass. The pair is merged as a plain one in the same
@@ -292,8 +385,8 @@ validator are in docs/RECURRENCE.md; code in `Engine/RepeatSync.swift`.
 - A template stopped in Things is a tombstone (`ThingsSnapshot.removedTemplates` keeps the `tir` day it had).
   The reminder's repeat is cleared (`--recurrence clear`), it takes the date of the plain to-do Things created,
   and the link moves to that to-do: the only open, unlinked, non-repeating to-do in the list's target with the
-  same title whose `tir` and start day are that day. With no such to-do the tombstone is a deletion, like a
-  trashed template. The occurrences Things detached are plain to-dos and sync as new items.
+  same title whose `tir` and start day are that day. Things gave that to-do the template's checklist, so the
+  agreed checklist items still hold. With no such to-do the tombstone is a deletion, like a trashed template. The occurrences Things detached are plain to-dos and sync as new items.
 - A template that loses its rule but still exists clears the reminder's rule. A paused template (`icp` true) is
   still a template and the pair is left as it is. Deleting the reminder trashes the template and its open
   occurrences.
@@ -421,7 +514,7 @@ Cleanup, always limited to ledger entries and never to a container a mapping sti
   status row with a Check Again button and an optional RemCTL path), **Lists** (saving a list off asks "Keep Everything" or "Remove N synced copies…"; each list has "Remove list from sync…"; every Reminders list with an enable toggle, a mode
   picker (Project, Area, Tag, Heading), a target picker of existing Things projects/areas/tags plus "New …" with a title,
   and the linked-item count; Heading mode picks the project first, then one of its headings or "New …"; Project mode has a
-  "Sync sections as headings" toggle), **Options** (Things poll interval, Reminders poll interval, reconcile interval, include completed on first
+  "Sync sections as headings" toggle; the per-list preferences have no controls yet), **Options** (Things poll interval, Reminders poll interval, reconcile interval, include completed on first
   link (saving it off offers to remove the completed copies), propagate deletes, open at login via `SMAppService.mainApp`), **Activity** (log, newest
   first, with levels).
 - Credentials in the Keychain (generic password, service `com.oliverames.ThingsRemindersSync`).

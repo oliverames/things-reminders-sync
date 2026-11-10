@@ -74,10 +74,25 @@ template's next day, Tuesday 2026-11-10). Only the template is written, and only
 `rr.sr` kept the old rule's `sr` (2026-11-09). `rr.ia` became the template's current `tir` (2026-11-10).
 `tir`, `icsd` and `icc` were not written, because the next day did not change. The app writes exactly this when
 a reminder's rule changes and its date does not: `md` and `rr`, with the old `sr` and `ia` set to the template's
-`tir`. An edit that moves the next day was not sampled. When a rule change and a new next day arrive together
-the app writes `md`, `rr`, `tir`, `icsd` and `ato`, and keeps the old `ia`. That is the app's own choice, not a
-sampled shape. An old rule that repeats after completion has no `ia` to keep, so the new rule's `ia` and `sr`
-are the template's next day; that is also the app's own choice.
+`tir`.
+
+**Rule edited so that the next day moves** (second sampling session, 2026-11-09, history indexes after 1716; the
+template was created by the MCP connector as `Task6` and edited in the Things 3.24.2 Mac app). The template was
+daily with `tir` = `icsd` = `1794268800` (Tue 2026-11-10) and was changed to weekly on Friday. One update on the
+template:
+
+    QWDpWqkzjS5Tny3BX2js2X {"t":1,"e":"Task7","p":{"ti":-543,"rr":{"of":[{"wd":5}],"rrv":4,"tp":0,"ts":0,"fu":256,"ia":1794268800,"fa":1,"sr":1794182400,"rc":0,"ed":64092211200},"md":1794276589.185753,"icsd":1794528000,"tir":1794528000}}
+
+`rr.sr` kept the old rule's `sr`. `rr.ia` is the `tir` the template had before the edit (2026-11-10), as in the
+first sample. `tir` and `icsd` both moved to the new next day (Fri 2026-11-13 = `1794528000`). `icc` was not
+written. `ti` is the Today sort index, which the app happened to rewrite; it has nothing to do with the rule.
+
+The app writes this when a rule change and a new next day arrive together: `md`, `rr` (old `sr`, `ia` = the
+template's `tir` before the edit), `tir` and `icsd`, and nothing else. It never writes `ti`. One key can be added:
+`ato`, only when the reminder's time of day changed in the same edit. That is the app's own combination of two
+edits, not a sampled shape. A move of the next day without a rule change writes `md`, `tir` and `icsd`, plus
+`ato` under the same condition. An old rule that repeats after completion has no `ia` to keep, so the new
+rule's `ia` and `sr` are the template's next day; that is also the app's own choice.
 
 **Paused and resumed** (Items > Repeat > Pause, then Resume):
 
@@ -97,12 +112,33 @@ for the next day, the open occurrence detached with no `md`, and the template de
 The app writes this commit (`ThingsCloudClient.stopRepeating`) when the reminder of a template pair loses its
 repeat: the same 34 keys on the create, with `lt` true, `md` null, `icsd` null, `rr` null, `ato` null, `st` 2
 and `sr` = `tir` = the template's next day; `{"rt":[]}` and nothing else on every open, untrashed occurrence;
-and the tombstone. Title, `pr`, `agr` and `ar` are copied from the template. The sampled template had no notes
-and no tags, so the sample shows `nt` empty and `tg` `[]`; the app writes the template's own notes and tags
-there, which gives the sampled values for a template that has none. Whether Things itself carries notes, tags,
-a reminder time or checklist items over to the plain to-do was not sampled. The app leaves `ato` null as
-sampled and writes no checklist items in this commit; the reminder's time and subtasks reach the new to-do
-afterwards as ordinary updates. The validator needed no change for these entries.
+and the tombstone. Title, `pr`, `agr` and `ar` are copied from the template. The validator needed no change for
+these entries.
+
+**Stopped, with notes, a tag and checklist items** (second sampling session, 2026-11-09). The template had notes,
+one tag and two checklist items, and `tir` 2026-11-10. One commit:
+
+    UigGY7zyRphxNeq29WvYSn {"t":0,"e":"Task7","p":{ ...the same full plain create as the first Stop sample..., "tt":"Stop sample B","sr":1794268800,"tir":1794268800,"st":2,"lt":true,"md":null,"ato":null,"dd":null,"rt":[],"rr":null,"ix":0,"ti":0,"tg":["H96sVJwE7VJveAnv7itmux"],"nt":{"t":1,"ch":2335530048,"v":"Sample **notes**","_t":"tx"},"pr":["JVH7o2GV7gnw7YsLPKuCZP"]}}
+    7TLMQbE9hG8o2TdFwn6LzJ {"t":0,"e":"ChecklistItem3","p":{"ix":0,"cd":1794276623.623518,"ts":["UigGY7zyRphxNeq29WvYSn"],"sp":null,"ss":0,"xx":{"sn":{},"_t":"oo"},"tt":"One","md":null,"lt":true}}
+    JsTGHgcvXPosetALtfCoeD {"t":0,"e":"ChecklistItem3","p":{"lt":true,"cd":1794276623.623518,"ts":["UigGY7zyRphxNeq29WvYSn"],"sp":null,"ss":0,"xx":{"sn":{},"_t":"oo"},"md":null,"tt":"Two","ix":1}}
+    TKnz93jLYf8GVtyVrDmG5e {"t":2,"e":"ChecklistItem3","p":{}}
+    JSvw5KYxebS5HuDk6u2jz1 {"t":2,"e":"ChecklistItem3","p":{}}
+    2ERKk97mjgwvtiBNL8cYVZ {"t":1,"e":"Task7","p":{"rt":[]}}
+    42z5x6HRuXwRLnakSF6teh {"t":2,"e":"Task7","p":{}}
+
+So Stop copies the template's notes (with their checksum) and tags to the new to-do. It creates each checklist
+item again for the new to-do, with `lt` true, `md` null, the same `cd` as the new to-do and `ix` 0, 1, ... in the
+template's order, and it tombstones the template's own checklist items. The open occurrence is detached and the
+template tombstoned as in the first sample.
+
+`stopRepeating` writes exactly this in one commit: the template's notes and tags on the create, one
+`ChecklistItem3` create per checklist item of the template with the nine sampled keys (`ix`, `cd`, `ts`, `sp`,
+`ss`, `xx`, `tt`, `md`, `lt`), and a tombstone for each of the template's own items. `ss` and `sp` are carried
+from the template's item; both sampled items were open, so a completed item carrying `ss` 3 and its `sp` is the
+app's reading of the sample, not a sampled value. The engine then knows the new items' ids, so a subtask change
+in the same pass reaches them, and the checklist the pair had agreed on stays agreed. `ato` stays null as in both
+samples: neither sampled template had a reminder time, so the reminder's time reaches the new to-do afterwards as
+an ordinary update. The validator needed no change.
 
 Which to-do the reminder is linked to afterwards depends on the open, untrashed occurrences the template had
 when it was stopped. The Stop commit itself is the same in every case.

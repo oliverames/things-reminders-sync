@@ -99,6 +99,19 @@ extension SyncPass {
         if !wanted.isEmpty { env.flaggedId = sorted.first { $0.title == wanted }?.id }
         var excluded: Set<String> = Set(config.mappings.filter { $0.mode == .tag }.compactMap(\.targetId))
         if let f = env.flaggedId { excluded.insert(f) }
+        // A list's `alwaysTag` is an existing tag (exact title first, then without case). It is never synced as a tag,
+        // and a list that syncs one way from Things does not put it on anything (the app writes nothing to Things there).
+        for m in config.mappings {
+            guard let wanted = m.alwaysTag?.trimmingCharacters(in: .whitespacesAndNewlines), !wanted.isEmpty else { continue }
+            guard let tag = sorted.first(where: { $0.title == wanted }) ?? sorted.first(where: { $0.title.lowercased() == wanted.lowercased() }) else {
+                if isFull, activeById[m.id] != nil {
+                    log(.info, "\"\(m.listTitle)\": no tag is added to its to-dos, because Things has no tag titled \"\(wanted)\" (this app never creates one)")
+                }
+                continue
+            }
+            excluded.insert(tag.id)
+            if m.direction != .thingsToReminders { alwaysTagIds[m.id] = tag.id }
+        }
         // RemCTL's `set_tags` takes one comma-separated string, so a title with a comma cannot be written to Reminders.
         for tag in sorted where !excluded.contains(tag.id) && !tag.title.isEmpty && !tag.title.contains(",") {
             let key = TagEnvironment.key(tag.title)
@@ -117,7 +130,50 @@ extension SyncPass {
 
     // MARK: Notes
 
-    func decideNotes(base: Fingerprint?, reminder r: ReminderItem, task t: ThingsTask, later: Side) -> NotesOutcome {
+    /// One-way notes: only the source's notes (or link) are copied, and nothing is written to the source. A change
+    /// made only on the receiver is left alone, with the fingerprint unchanged, until the source's notes change.
+    func decideNotesOneWay(base: Fingerprint?, reminder r: ReminderItem, task t: ThingsTask, source: Side) -> NotesOutcome {
+        let tn = Fingerprint.normalize(t.notes), nn = Fingerprint.normalize(r.notes)
+        let u = NotesLink.clean(r.url)
+        // Reminders gets the rendering of the Things notes; a link line becomes the rich link when the reminder has none.
+        func toReminders() -> NotesOutcome {
+            let (rn, ru) = NotesLink.render(thingsNotes: t.notes, existingURL: u)
+            var out = NotesOutcome(fpNotes: tn, fpRemindersNotes: Fingerprint.normalize(rn), fpURL: ru)
+            if out.fpRemindersNotes != nn { out.reminderNotes = rn }
+            if u == nil, let ru { out.reminderURL = ru }
+            return out
+        }
+        func toThings(_ wanted: String) -> NotesOutcome {
+            var out = NotesOutcome(fpNotes: Fingerprint.normalize(wanted), fpRemindersNotes: nn, fpURL: u)
+            if out.fpNotes != tn { out.thingsNotes = wanted }
+            return out
+        }
+        guard let base else {
+            // First link: a source with no notes leaves the receiver's notes alone; a reminder with only a link adds its line.
+            let asIs = NotesOutcome(fpNotes: tn, fpRemindersNotes: nn, fpURL: u)
+            switch source {
+            case .things: return tn.isEmpty ? asIs : toReminders()
+            case .reminders:
+                if nn.isEmpty { return u == nil ? asIs : toThings(NotesLink.thingsNotes(notes: t.notes, url: u)) }
+                return toThings(NotesLink.thingsNotes(notes: r.notes, url: u))
+            }
+        }
+        let legacy = base.remindersNotes == nil
+        let t0 = base.notes
+        let n0 = base.remindersNotes ?? base.notes
+        let u0: String? = legacy ? (u.flatMap { NoteFormatting.containsLink($0, in: t.notes) ? $0 : nil }) : NotesLink.clean(base.url)
+        let unchanged = NotesOutcome(fpNotes: t0, fpRemindersNotes: n0, fpURL: u0)
+        switch source {
+        case .things: return tn != t0 ? toReminders() : unchanged
+        case .reminders:
+            if nn != n0 { return toThings(NotesLink.thingsNotes(notes: r.notes, url: u)) }
+            if u != u0 { return toThings(NotesLink.replacingTrailingURL(in: t.notes, old: u0, new: u)) }
+            return unchanged
+        }
+    }
+
+    func decideNotes(base: Fingerprint?, reminder r: ReminderItem, task t: ThingsTask, later: Side, source: Side? = nil) -> NotesOutcome {
+        if let source { return decideNotesOneWay(base: base, reminder: r, task: t, source: source) }
         let tn = Fingerprint.normalize(t.notes), nn = Fingerprint.normalize(r.notes)
         let u = NotesLink.clean(r.url)
 
@@ -185,23 +241,43 @@ extension SyncPass {
 
     // MARK: Flagged
 
-    func decideFlag(base: Fingerprint?, reminder r: ReminderItem, task t: ThingsTask) -> FlagOutcome {
+    func decideFlag(base: Fingerprint?, reminder r: ReminderItem, task t: ThingsTask, source: Side? = nil) -> FlagOutcome {
         guard let fid = tagEnv.flaggedId else { return FlagOutcome(fp: base?.flagged) }
         let rf = r.flagged, tf = t.tagIds.contains(fid), b = base?.flagged ?? false
         if rf == tf { return FlagOutcome(fp: rf) }
+        if let source {
+            // One way: the source's flag is copied when it changed; a flag only the receiver changed is ignored.
+            let s = source == .reminders ? rf : tf
+            if s == b { return FlagOutcome(fp: s) }
+            return source == .reminders ? FlagOutcome(thingsTag: s, fp: s) : FlagOutcome(reminderFlag: s, fp: s)
+        }
         if rf != b { return FlagOutcome(thingsTag: rf, fp: rf) }
         return FlagOutcome(reminderFlag: tf, fp: tf)
     }
 
     // MARK: Tags
 
-    func decideTags(base: Fingerprint?, reminder r: ReminderItem, task t: ThingsTask) -> TagOutcome {
+    func decideTags(base: Fingerprint?, reminder r: ReminderItem, task t: ThingsTask, source: Side? = nil) -> TagOutcome {
         // Everything compares by lowercased title: a reminder's `#errands` and the Things tag "Errands" are the same tag.
         let key = TagEnvironment.key
         let mappable = Set(tagEnv.idByKey.keys)
         let rset = Set(r.tags.map(key)).intersection(mappable)
         let tset = thingsTagKeys(t)
         let b = Set((base?.tags ?? []).map(key)).intersection(mappable)
+        if let source {
+            // One way: a tag added to or removed from the source is added to or removed from the receiver. Tags only
+            // the receiver gained or lost are ignored, and the agreed set is the source's.
+            let sset = source == .reminders ? rset : tset, vset = source == .reminders ? tset : rset
+            let adds = sset.subtracting(b).subtracting(vset), removes = b.subtracting(sset).intersection(vset)
+            var out = TagOutcome(fp: sset.compactMap { tagEnv.titleByKey[$0] }.sorted())
+            if source == .reminders {
+                out.thingsAdd = adds.sorted().compactMap { tagEnv.idByKey[$0] }
+                out.thingsRemove = t.tagIds.filter { id in snapshot.tags[id].map { removes.contains(key($0.title)) } ?? false }
+            } else if !adds.isEmpty || !removes.isEmpty {
+                out.reminderTags = r.tags.filter { !removes.contains(key($0)) } + adds.sorted().compactMap { tagEnv.titleByKey[$0] }
+            }
+            return out
+        }
         let final = b.subtracting(b.subtracting(rset)).subtracting(b.subtracting(tset)).union(rset.subtracting(b)).union(tset.subtracting(b))
         var out = TagOutcome(fp: final.compactMap { tagEnv.titleByKey[$0] }.sorted())
         // Things: carry the tags with those titles; removal covers every tag of the to-do with a removed title.
@@ -217,9 +293,11 @@ extension SyncPass {
 
     // MARK: Checklist
 
-    func decideChecklist(base: Fingerprint?, reminder r: ReminderItem, task t: ThingsTask) -> ChecklistOutcome {
-        // Checklist writes to Things use the shapes sampled from the Things app (docs/SPEC.md); `syncChecklists` turns them off.
-        let write = config.syncChecklists
+    func decideChecklist(base: Fingerprint?, reminder r: ReminderItem, task t: ThingsTask, mapping: ListMapping? = nil) -> ChecklistOutcome {
+        // Checklist writes to Things use the shapes sampled from the Things app (docs/SPEC.md); `syncChecklists` (the
+        // list's own setting, else the global one) turns them off.
+        let write = writesChecklists(mapping)
+        let source = mapping?.direction.source
         func unique<T>(_ items: [T], title: (T) -> String) -> [(key: String, item: T)] {
             var seen = Set<String>(), out: [(String, T)] = []
             for i in items {
@@ -243,6 +321,39 @@ extension SyncPass {
             let rs = rMap[key], ts = tMap[key], b = bMap[key]
             func keep(_ title: String, _ done: Bool) { out.fp.append(.init(title: title, done: done)) }
             func keepBase() { if let b { out.fp.append(b) } }
+            if let source {
+                // One way: an item added, removed, completed or reopened on the source is copied to the receiver. What
+                // only the receiver changed is ignored, and the agreed entry stays the source's. Things is only
+                // written when checklist writes are on; Reminders always is.
+                let s: (title: String, done: Bool)? = source == .reminders ? rs.map { ($0.title, $0.completed) } : ts.map { ($0.title, $0.completed) }
+                let receiverDone: Bool? = source == .reminders ? ts?.completed : rs?.completed
+                let canWrite = source == .things || write
+                switch (s, receiverDone) {
+                case let (s?, v?):
+                    if s.done == v { keep(ts?.title ?? s.title, s.done); break }
+                    guard b.map({ s.done != $0.done }) ?? s.done else {   // only the receiver differs (first sight: an open source item)
+                        if b != nil { keepBase() } else { keep(s.title, s.done) }
+                        break
+                    }
+                    guard canWrite else { keepBase(); break }
+                    if source == .reminders, let ts { out.thingsChanges.append(.setCompleted(id: ts.id, completed: s.done)) }
+                    if source == .things, let rs { out.subtaskOps.append(.setCompleted(id: rs.id, done: s.done)); out.touched.insert(key) }
+                    keep(s.title, s.done)
+                case let (s?, nil):
+                    guard b == nil else { keepBase(); break }   // the receiver removed it: ignored
+                    guard canWrite else { break }
+                    if source == .reminders { out.thingsChanges.append(.add(title: s.title, completed: s.done)) }
+                    else { out.addSubtasks.append(s.title); out.touched.insert(key) }
+                    keep(s.title, s.done)
+                case (nil, _?):
+                    guard b != nil else { break }               // added on the receiver: ignored
+                    guard canWrite else { keepBase(); break }
+                    if source == .reminders, let ts { out.thingsChanges.append(.delete(id: ts.id)) }
+                    if source == .things, let rs { out.subtaskOps.append(.delete(id: rs.id)); out.touched.insert(key) }
+                case (nil, nil): break
+                }
+                continue
+            }
             switch (rs, ts) {
             case let (rs?, ts?):
                 var final = rs.completed
@@ -285,8 +396,9 @@ extension SyncPass {
 
     /// Adds the notes, flag, tag and checklist decisions to a plan. Notes edited on both sides go to the side whose
     /// notes changed later; the flag, tags and checklist merge by their own rules and use no times.
-    func mergeFields(into plan: inout MergePlan, base: Fingerprint?, reminder r: ReminderItem, task t: ThingsTask) {
-        let n = decideNotes(base: base, reminder: r, task: t, later: laterSide(.notes, r, t))
+    func mergeFields(into plan: inout MergePlan, base: Fingerprint?, reminder r: ReminderItem, task t: ThingsTask, mapping: ListMapping? = nil) {
+        let source = mapping?.direction.source
+        let n = decideNotes(base: base, reminder: r, task: t, later: laterSide(.notes, r, t), source: source)
         plan.reminderPatch.notes = n.reminderNotes
         plan.reminderPatch.url = n.reminderURL
         plan.thingsPatch.notes = n.thingsNotes
@@ -294,7 +406,7 @@ extension SyncPass {
         if n.conflict { plan.conflicts.append("notes") }
         plan.fingerprint.notes = n.fpNotes; plan.fingerprint.remindersNotes = n.fpRemindersNotes; plan.fingerprint.url = n.fpURL
 
-        let f = decideFlag(base: base, reminder: r, task: t)
+        let f = decideFlag(base: base, reminder: r, task: t, source: source)
         if let tag = f.thingsTag, let id = tagEnv.flaggedId {
             if tag { plan.thingsPatch.addTagIds = (plan.thingsPatch.addTagIds ?? []) + [id] }
             else { plan.thingsPatch.removeTagIds = (plan.thingsPatch.removeTagIds ?? []) + [id] }
@@ -302,13 +414,13 @@ extension SyncPass {
         plan.reminderPatch.flagged = f.reminderFlag
         plan.fingerprint.flagged = f.fp
 
-        let g = decideTags(base: base, reminder: r, task: t)
+        let g = decideTags(base: base, reminder: r, task: t, source: source)
         if !g.thingsAdd.isEmpty { plan.thingsPatch.addTagIds = (plan.thingsPatch.addTagIds ?? []) + g.thingsAdd }
         if !g.thingsRemove.isEmpty { plan.thingsPatch.removeTagIds = (plan.thingsPatch.removeTagIds ?? []) + g.thingsRemove }
         plan.reminderPatch.tags = g.reminderTags
         plan.fingerprint.tags = g.fp
 
-        let c = decideChecklist(base: base, reminder: r, task: t)
+        let c = decideChecklist(base: base, reminder: r, task: t, mapping: mapping)
         if !c.addSubtasks.isEmpty { plan.reminderPatch.addSubtasks = c.addSubtasks }
         if !c.thingsChanges.isEmpty { plan.thingsPatch.checklist = c.thingsChanges }
         plan.subtaskOps = c.subtaskOps
@@ -394,7 +506,8 @@ extension SyncPass {
         var entries: [Fingerprint.ChecklistEntry]
     }
 
-    func thingsFields(from r: ReminderItem) -> ThingsFields {
+    func thingsFields(from r: ReminderItem, mapping: ListMapping? = nil) -> ThingsFields {
+        let writeChecklist = writesChecklists(mapping)
         let u = NotesLink.clean(r.url)
         var tagIds: [String] = []
         var titles: [String] = []
@@ -408,9 +521,9 @@ extension SyncPass {
         for s in r.subtasks where seen.insert(checklistKey(s.title)).inserted && !checklistKey(s.title).isEmpty {
             items.append(.init(title: s.title, done: s.completed))
         }
-        let entries = config.syncChecklists ? items : []
+        let entries = writeChecklist ? items : []
         return ThingsFields(notes: NotesLink.thingsNotes(notes: r.notes, url: u), tagIds: tagIds,
-                            checklist: config.syncChecklists ? items.map { ThingsChecklistDraft(title: $0.title, completed: $0.done) } : [],
+                            checklist: writeChecklist ? items.map { ThingsChecklistDraft(title: $0.title, completed: $0.done) } : [],
                             flagged: flagged, tags: titles.sorted(), entries: entries)
     }
 

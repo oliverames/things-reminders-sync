@@ -35,6 +35,10 @@ public struct Fingerprint: Codable, Hashable, Sendable {
     public var tags: [String]?
     /// Subtasks / checklist items both sides agreed on. Nil: never synced, read as none.
     public var checklist: [ChecklistEntry]?
+    /// Set when the to-do was created in Today for a reminder with no due date (`ListMapping.undatedArriveAs`): the
+    /// start day it was given. While the to-do still starts on that day with no time and the reminder has no due
+    /// date, that day is not a due date and is not copied to Reminders. Cleared as soon as either side changes its date.
+    public var undatedThingsDay: String? = nil
 
     public struct ChecklistEntry: Codable, Hashable, Sendable {
         public var title: String
@@ -188,6 +192,9 @@ public struct LinkStore: Codable, Hashable, Sendable {
     public var ownedSections: [OwnedReminderSection] = []
     /// Set once the one-time ledger inference for data created before the ledger existed has run.
     public var ledgerBackfilled = false
+    /// Mapping ids seen paused. A list stays here until the first full pass without failures after it resumes; until
+    /// then an item missing on one side of its pairs is never treated as a deletion (the pair is unlinked instead).
+    public var pausedMappings: Set<String> = []
 
     public init(links: [LinkRecord] = [], linkedMappings: [String: String] = [:],
                 detachedThingsIds: Set<String> = [], detachedReminderIds: Set<String> = []) {
@@ -205,6 +212,7 @@ public struct LinkStore: Codable, Hashable, Sendable {
         ownedThings = try c.decodeIfPresent([OwnedThingsContainer].self, forKey: .ownedThings) ?? []
         ownedSections = try c.decodeIfPresent([OwnedReminderSection].self, forKey: .ownedSections) ?? []
         ledgerBackfilled = try c.decodeIfPresent(Bool.self, forKey: .ledgerBackfilled) ?? false
+        pausedMappings = try c.decodeIfPresent(Set<String>.self, forKey: .pausedMappings) ?? []
     }
 
     public func count(mappingId: String) -> Int { links.reduce(0) { $0 + ($1.mappingId == mappingId ? 1 : 0) } }

@@ -14,7 +14,8 @@ struct ThingsDatabase: Sendable {
     var areas: [String: ThingsArea] = [:]
     var tags: [String: ThingsTag] = [:]
     /// Checklist items by their own id, with the parent task id (`ts`).
-    struct ChecklistRow: Sendable { var taskId: String?; var item: ThingsChecklistItem }
+    /// `status` and `stopDate` are the raw `ss` and `sp`, kept so Stop can carry them to the copy of the item.
+    struct ChecklistRow: Sendable { var taskId: String?; var item: ThingsChecklistItem; var status = 0; var stopDate: Double? }
     var checklistItems: [String: ChecklistRow] = [:]
     var latestServerIndex = 0
     /// Templates removed by a tombstone, with the `tir` day each had (see `ThingsSnapshot.removedTemplates`).
@@ -58,7 +59,8 @@ struct ThingsDatabase: Sendable {
             } else if change.e.hasPrefix("ChecklistItem") {
                 var row = change.t == 0 ? ChecklistRow(taskId: nil, item: ThingsChecklistItem(id: id, title: "")) : (checklistItems[id] ?? ChecklistRow(taskId: nil, item: ThingsChecklistItem(id: id, title: "")))
                 if let v = p["tt"] { row.item.title = v.string ?? "" }
-                if let v = p["ss"] { row.item.completed = (v.int ?? 0) != 0 }
+                if let v = p["ss"] { row.item.completed = (v.int ?? 0) != 0; row.status = v.int ?? 0 }
+                if let v = p["sp"] { row.stopDate = v.double }
                 if let v = p["ix"] { row.item.index = v.double ?? 0 }
                 if let v = p["ts"] { row.taskId = v.array?.first?.string }
                 checklistItems[id] = row

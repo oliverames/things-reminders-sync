@@ -124,6 +124,10 @@ final class SyncPass {
     var failedMappings: Set<String> = []
     var groceryLists: Set<String> = []
     var tagEnv = TagEnvironment()
+    /// Lists that were paused and are syncing again: until a full pass has gone through, nothing missing is a deletion.
+    var resuming: Set<String> = []
+    /// Mapping id -> id of the existing Things tag its `alwaysTag` names (never for a list that syncs one way from Things).
+    var alwaysTagIds: [String: String] = [:]
 
     init(engine: SyncEngine, config: SyncConfig, store: LinkStore, scope: SyncScope, force: Bool, backfillLog: [SyncLogEntry]?) {
         things = engine.things; reminders = engine.reminders; days = DayFormatter(timeZone: engine.timeZone)
@@ -167,7 +171,10 @@ final class SyncPass {
             store = result.store
             if result.hasChanges { log(.info, "Worked out which items this app created: \(result.summary)") }
         }
+        store.pausedMappings.formIntersection(config.mappings.map(\.id))
+        store.pausedMappings.formUnion(config.pausedListIds)
         buildActiveMappings(lists: lists)
+        resuming = store.pausedMappings.intersection(activeById.keys)
         await migrateRetargetedMappings()
         buildThingsScope()
         buildTagEnvironment()
@@ -185,6 +192,8 @@ final class SyncPass {
         store.links.removeAll { removedLinks.contains($0.id) }
         await recordCreatedSections()
         if isFull {
+            // Every link of a resumed list has now been looked at once: from the next pass on it syncs as usual.
+            if report.failures == 0 { store.pausedMappings.subtract(resuming) }
             if backfillLog != nil { store.ledgerBackfilled = true }
             await cleanUpEmptyHeadingsAndSections(lists: lists)
 
@@ -202,7 +211,7 @@ final class SyncPass {
     // MARK: Targets and mappings
 
     func ensureTargets() async {
-        for i in config.mappings.indices where config.mappings[i].enabled && config.mappings[i].targetId == nil && !config.mappings[i].awaitingTarget {
+        for i in config.mappings.indices where config.mappings[i].isLive && config.mappings[i].targetId == nil {
             let m = config.mappings[i]
             do {
                 let id: String
@@ -246,6 +255,10 @@ final class SyncPass {
     func buildActiveMappings(lists: [ReminderList]) {
         let listsById = Dictionary(uniqueKeysWithValues: lists.map { ($0.id, $0) })
         for m in config.mappings where m.enabled {
+            if m.paused {
+                if isFull { log(.info, "\"\(m.listTitle)\" is paused: its items and links are left as they are") }
+                continue
+            }
             if m.awaitingTarget {
                 log(.info, "\"\(m.listTitle)\" is paused until you choose a Things \(m.mode.rawValue) in Settings")
                 continue
@@ -301,6 +314,17 @@ final class SyncPass {
             var oldMapping = m
             oldMapping.mode = oldMode
             oldMapping.targetId = oldTargetId.isEmpty ? nil : oldTargetId
+            if m.direction == .thingsToReminders {
+                // One way from Things: the app does not move to-dos there. Linked to-dos still in the old target fall
+                // out of the list's scope (their links are parked, both items stay), and the new target is linked by title.
+                let left = store.links.filter { link in
+                    link.mappingId == m.id && (snapshot.tasks[link.thingsId].map { !$0.trashed && matches($0, oldMapping) && !matches($0, m) } ?? false)
+                }.count
+                if left > 0 {
+                    log(.info, "\"\(m.listTitle)\" syncs one way from Things, so its \(left) linked to-do\(left == 1 ? " was" : "s were") not moved to the new Things \(m.mode.rawValue); to-dos left in the old \(oldMode.rawValue) are no longer synced")
+                }
+                continue
+            }
             var moved = 0
             var failed = false
             for link in store.links where link.mappingId == m.id {
@@ -449,7 +473,9 @@ final class SyncPass {
     /// syncs whatever changed meanwhile against its old fingerprint (and follows a move to another list).
     func reattachParkedLinks() {
         var keep: [LinkRecord] = []
+        let paused = config.pausedListIds
         for parked in store.parkedLinks {
+            if paused.contains(parked.mappingId) { keep.append(parked); continue }   // a paused list is left alone
             let task = snapshot.tasks[parked.thingsId].flatMap { $0.trashed ? nil : $0 }
             let reminder = findReminder(parked)
             switch (task, reminder) {
@@ -489,6 +515,8 @@ final class SyncPass {
 
     func processLink(_ link: LinkRecord) async {
         guard let mapping = activeById[link.mappingId], included(link) else { return }
+        // In a one-way list `source` is the side changes come from; nothing is ever written to it.
+        let source = mapping.direction.source
         let reminder = findReminder(link)
         let task = snapshot.tasks[link.thingsId]
         let thingsGone = task == nil || task!.trashed
@@ -500,25 +528,30 @@ final class SyncPass {
             log(.info, "Dropped link for \"\(title)\": gone on both sides")
             return
         case (nil, false):
-            if config.propagateDeletes { queueDelete(mapping.id, link.id, .trashThings(link.thingsId), title) }
+            if resuming.contains(mapping.id) { unlink(link, "its reminder went missing while the list was paused (nothing is deleted after a pause)") }
+            else if source == .things { unlink(link, "reminder deleted (this list syncs one way from Things, so the to-do is kept)") }
+            else if propagatesDeletes(mapping) { queueDelete(mapping.id, link.id, .trashThings(link.thingsId), title) }
             else { unlink(link, "reminder deleted (deletes are not propagated)") }
             return
         case (_, true):
             // Stop in Things deletes the template for good and keeps a plain to-do for its next day: the pair carries
-            // on with that to-do. (A trashed template is still there and is a deletion, below.)
-            if link.repeatMode == .template, task == nil, let r = reminder, !r.completed,
+            // on with that to-do. (A trashed template is still there and is a deletion, below.) Both of these write
+            // the reminder, so neither runs in a list that syncs one way from Reminders.
+            if source != .reminders, link.repeatMode == .template, task == nil, let r = reminder, !r.completed,
                let plain = stoppedSuccessor(for: link, mapping: mapping) {
                 await continueStoppedPair(link, reminder: r, task: plain)
                 return
             }
             // Things removes a to-do that was given a repeat with a first date in the future and keeps a new template:
             // the pair moves to the template instead of the reminder being deleted.
-            if link.repeatMode == nil, let r = reminder, !r.completed,
+            if source != .reminders, link.repeatMode == nil, let r = reminder, !r.completed,
                let template = successorTemplate(for: link, task: nil, mapping: mapping) {
                 await convertToTemplatePair(link, reminder: r, template: template)
                 return
             }
-            if config.propagateDeletes, let r = reminder { queueDelete(mapping.id, link.id, .deleteReminder(r.id), title) }
+            if resuming.contains(mapping.id) { unlink(link, "its Things to-do went missing while the list was paused (nothing is deleted after a pause)") }
+            else if source == .reminders { unlink(link, "Things to-do deleted (this list syncs one way from Reminders, so the reminder is kept)") }
+            else if propagatesDeletes(mapping), let r = reminder { queueDelete(mapping.id, link.id, .deleteReminder(r.id), title) }
             else { unlink(link, "Things to-do deleted (deletes are not propagated)") }
             return
         default: break
@@ -528,7 +561,12 @@ final class SyncPass {
 
         switch link.repeatMode {
         case .template:
-            if !task.isTemplate {
+            if !task.isTemplate, source == .reminders {
+                // One way from Reminders: the reminder keeps its repeat, and the to-do stands for its current occurrence.
+                link.repeatMode = .reminderRepeats; link.fingerprint.rule = nil
+                replace(link)
+                log(.info, "\"\(reminder.title)\" no longer repeats in Things; the reminder keeps its repeat (this list syncs one way from Reminders)")
+            } else if !task.isTemplate {
                 // The template stopped repeating: the reminder stops too, and the pair carries on as a plain one.
                 do {
                     reminder = try await reminders.update(id: reminder.id, patch: ReminderPatch(recurrence: .some(nil)))
@@ -536,7 +574,8 @@ final class SyncPass {
                     replace(link)
                     log(.change, "Removed the repeat from reminder \"\(reminder.title)\": the Things to-do no longer repeats")
                 } catch { fail("Could not remove the repeat from \"\(title)\": \(error.localizedDescription)"); return }
-            } else if !reminder.isRepeating {
+            } else if !reminder.isRepeating, source != .things {
+                // (One way from Things, a reminder that lost its repeat is a change on the receiving side: ignored.)
                 // The reminder lost its repeat: the template is stopped as Things' own Stop does, and the pair carries
                 // on below as a plain one, on the template's open occurrence or, without one, on the to-do for its
                 // next day. A finished reminder (its last occurrence is done) and a template with no next day are
@@ -550,21 +589,25 @@ final class SyncPass {
             if !reminder.isRepeating { link.repeatMode = nil; replace(link) }   // stopped repeating: a plain pair now
         case nil:
             // An item that was given a repeat after it was linked stays linked.
-            if task.isOccurrence, !reminder.completed, let template = successorTemplate(for: link, task: task, mapping: mapping) {
+            if source != .reminders, task.isOccurrence, !reminder.completed, let template = successorTemplate(for: link, task: task, mapping: mapping) {
                 // Things moved the rule to a new template and made the linked to-do its first occurrence.
                 await convertToTemplatePair(link, reminder: reminder, template: template)
                 return
             }
             if task.isTemplate {
                 if reminder.isRepeating { link.repeatMode = .template; replace(link) }
+                else if source == .reminders { unlink(link, "the Things to-do became repeating (this list syncs one way from Reminders)"); return }
                 else if templateSyncs(task) { await convertToTemplatePair(link, reminder: reminder, template: task); return }
                 else { unlink(link, "the Things to-do repeats in a way Reminders cannot hold"); return }
             } else if reminder.isRepeating, !task.isOccurrence {
                 // The reminder was given a repeat: the to-do stands for the current occurrence. When the reminder moves
-                // on, the to-do is replaced (by a repeating to-do when Things can hold the rule).
-                link.repeatMode = .reminderRepeats
-                replace(link)
-                log(.info, "\"\(reminder.title)\" now repeats in Reminders; its Things to-do stands for the current occurrence")
+                // on, the to-do is replaced (by a repeating to-do when Things can hold the rule). One way from Things
+                // the repeat is a change on the receiving side, and the pair stays a plain one.
+                if source != .things {
+                    link.repeatMode = .reminderRepeats
+                    replace(link)
+                    log(.info, "\"\(reminder.title)\" now repeats in Reminders; its Things to-do stands for the current occurrence")
+                }
             } else if reminder.isRepeating {
                 unlink(link, "repeating item"); return
             }
@@ -572,7 +615,7 @@ final class SyncPass {
         let rm = activeById[reminder.listId]?.id
         let tm = thingsScope[task.id]
         guard let rm, let tm else { unlink(link, "moved out of scope", park: true); return }
-        if link.repeatMode == .reminderRepeats, link.awaitingReplacement, let m = activeById[rm] {
+        if link.repeatMode == .reminderRepeats, link.awaitingReplacement, source != .things, let m = activeById[rm] {
             await finishReplacement(link, reminder: reminder, task: task, mapping: m)
             return
         }
@@ -580,11 +623,19 @@ final class SyncPass {
         var destination: ListMapping?
         var movedThings = false   // true: the Things side must follow the reminder
         var movedReminder = false
+        // The list the pair is merged in when nothing moves it.
+        var home = tm
         if tm != rm {
             let thingsMoved = tm != link.mappingId
             let reminderMoved = rm != link.mappingId
-            let follow: Side
-            if thingsMoved && !reminderMoved { follow = .things }
+            let follow: Side?
+            if let source {
+                // One way: only a move made on the source side is followed. A move on the receiving side is ignored,
+                // and the pair stays in the list its source item is in.
+                follow = (source == .reminders ? reminderMoved : thingsMoved) ? source : nil
+                if follow == nil { home = source == .reminders ? rm : tm }
+            }
+            else if thingsMoved && !reminderMoved { follow = .things }
             else if reminderMoved && !thingsMoved { follow = .reminders }
             else {
                 // Both moved: the later move wins. A tag-mode list moves a to-do by its tags.
@@ -595,11 +646,11 @@ final class SyncPass {
                 follow = laterSide(reminder.modified(.placement), moved)
             }
             if follow == .things { destination = activeById[tm]; movedReminder = true }
-            else { destination = activeById[rm]; movedThings = true }
+            else if follow == .reminders { destination = activeById[rm]; movedThings = true }
         }
 
         var groupInput: GroupInput?
-        if destination == nil, let m = activeById[tm], sectionsActive(m) {
+        if destination == nil, let m = activeById[home], sectionsActive(m) {
             groupInput = GroupInput(things: thingsGroup(task, m), reminders: reminder.section,
                                     remindersReadOnly: groceryLists.contains(reminder.listId))
         }
@@ -608,24 +659,31 @@ final class SyncPass {
         case .template:
             // Title, notes and group merge as usual; due, completion and the rule are decided by the repeat logic.
             let (rEff, tEff) = neutralized(reminder: reminder, task: task, base: link.fingerprint)
-            plan = merge(base: link.fingerprint, reminder: rEff, task: tEff, group: groupInput)
+            plan = merge(base: link.fingerprint, reminder: rEff, task: tEff, group: groupInput, mapping: mapping)
             plan.fingerprint.rule = link.fingerprint.rule
-            templateExtras(link: link, reminder: reminder, task: task, plan: &plan)
-        case .reminderRepeats:
-            plan = reminderRepeatsPlan(link: link, reminder: reminder, task: task, group: groupInput)
-        case nil:
-            plan = merge(base: link.fingerprint, reminder: reminder, task: task, group: groupInput)
+            templateExtras(link: link, reminder: reminder, task: task, plan: &plan, source: source)
+        case .reminderRepeats where source != .things:
+            plan = reminderRepeatsPlan(link: link, reminder: reminder, task: task, group: groupInput, mapping: mapping)
+        case .reminderRepeats, nil:
+            // (One way from Things a `.reminderRepeats` pair merges as a plain one: the reminder moving on is a
+            // change on the receiving side.)
+            plan = merge(base: link.fingerprint, reminder: reminder, task: task, group: groupInput, mapping: mapping)
         }
         if let destination {
             if movedReminder { plan.reminderPatch.listId = destination.id }
             if movedThings { applyPlacement(&plan.thingsPatch, task: task, old: activeById[tm], new: destination) }
             followAcrossMove(&plan, destination: destination, thingsMoves: movedThings, reminder: reminder, task: task)
+            // The pair is linked through the new list from here on.
+            if let tag = alwaysTagIds[destination.id], !task.tagIds.contains(tag) {
+                plan.thingsPatch.addTagIds = (plan.thingsPatch.addTagIds ?? []) + [tag]
+            }
         }
-        let newMapping = destination?.id ?? tm
+        enforceDirection(&plan, source: source)
+        let newMapping = destination?.id ?? home
         do {
             var updated = link
             var advancedReminder: ReminderItem?
-            if case .some(let group) = plan.thingsGroup, let m = destination ?? activeById[tm] {
+            if case .some(let group) = plan.thingsGroup, let m = destination ?? activeById[home] {
                 plan.thingsPatch.placement = try await placement(forGroup: group, in: m)
             }
             var actualReminder: ReminderItem?
@@ -673,7 +731,7 @@ final class SyncPass {
                 plan.fingerprint.due = advanced.due
                 if advanced.completed { plan.fingerprint.completed = true }
             }
-            if plan.replaceThings, let fresh = try await replacePlainTodo(link: link, task: task, plan: plan, mapping: destination ?? activeById[tm],
+            if plan.replaceThings, let fresh = try await replacePlainTodo(link: link, task: task, plan: plan, mapping: destination ?? activeById[home],
                                                                           reminder: advancedReminder ?? reminder) {
                 updated.thingsId = fresh.id
                 updated.repeatMode = fresh.mode
@@ -712,6 +770,48 @@ final class SyncPass {
         if let i = store.links.firstIndex(where: { $0.id == link.id }) { store.links[i] = link }
     }
 
+    // MARK: Per-list preferences
+
+    func propagatesDeletes(_ m: ListMapping) -> Bool { m.propagateDeletes ?? config.propagateDeletes }
+    func writesChecklists(_ m: ListMapping?) -> Bool { m?.syncChecklists ?? config.syncChecklists }
+
+    /// The rule of a one-way list, applied to a finished plan: nothing is written to the source side. The decisions
+    /// in `merge` already leave the source alone; this is the one place that guarantees it for every kind of pair.
+    func enforceDirection(_ plan: inout MergePlan, source: Side?) {
+        switch source {
+        case .reminders:
+            plan.reminderPatch = ReminderPatch(); plan.subtaskOps = []; plan.checklistTouched = []; plan.reminderAdvances = false
+        case .things:
+            plan.thingsPatch = ThingsTodoPatch(); plan.thingsGroup = nil; plan.occurrenceWrites = []; plan.replaceThings = false
+        case nil: break
+        }
+    }
+
+    /// Where a new to-do made from `r` starts in Things. A reminder with a due date starts on it. One without follows
+    /// the list's `undatedArriveAs`; `undatedDay` is the start day a Today arrival was given (kept in the fingerprint,
+    /// so that day is never taken for a due date).
+    func arrival(of r: ReminderItem, in m: ListMapping) -> (when: DueDate?, someday: Bool, undatedDay: String?) {
+        guard r.due == nil, !r.completed else { return (r.due, false, nil) }
+        switch m.undatedArriveAs {
+        case .anytime: return (nil, false, nil)
+        case .someday: return (nil, true, nil)
+        case .today:
+            let today = days.day(Date())
+            return (DueDate(day: today), false, today)
+        }
+    }
+
+    /// Puts the list's `alwaysTag` on a to-do that was just linked through it. A failure is logged and not retried.
+    func addAlwaysTag(to t: ThingsTask, mapping m: ListMapping) async {
+        guard let tag = alwaysTagIds[m.id], !t.tagIds.contains(tag) else { return }
+        do {
+            try await things.updateTodo(id: t.id, patch: ThingsTodoPatch(addTagIds: [tag]))
+            snapshot.tasks[t.id]?.tagIds.append(tag)
+        } catch {
+            log(.warning, "Could not add the tag of \"\(m.listTitle)\" to \"\(t.title)\": \(error.localizedDescription)")
+        }
+    }
+
     func queueDelete(_ mappingId: String, _ linkId: UUID, _ action: PendingDelete, _ title: String) {
         pendingDeletes[mappingId, default: []].append((linkId, action, title))
     }
@@ -746,13 +846,27 @@ final class SyncPass {
 
     /// Per-field three-way merge. `base == nil` (first link) treats every differing field as a conflict.
     /// A field both sides changed goes to the side that changed that field later.
-    func merge(base: Fingerprint?, reminder r: ReminderItem, task t: ThingsTask, group: GroupInput? = nil) -> MergePlan {
+    /// `mapping` carries the list's preferences. In a one-way list only a change on the source side is copied: a
+    /// field only the receiver changed is left alone on both sides and the fingerprint keeps the source's value, so
+    /// the receiver's edit stays until the source changes that field. On a first link a source with no value (no due
+    /// date, not completed, no section) leaves the receiver's value alone.
+    func merge(base: Fingerprint?, reminder r: ReminderItem, task t: ThingsTask, group: GroupInput? = nil,
+               mapping: ListMapping? = nil) -> MergePlan {
+        let source = mapping?.direction.source
         let rf = Fingerprint(reminder: r, days: days)
-        let tf = Fingerprint(things: t, days: days)
+        var tf = Fingerprint(things: t, days: days)
+        // A to-do created in Today for a reminder with no due date: its start day is not a due date while it is as created.
+        var undatedDay: String?
+        if let day = base?.undatedThingsDay, base?.due == nil, t.startDate == day, t.reminderSeconds == nil { tf.due = nil; undatedDay = day }
         var plan = MergePlan(fingerprint: rf)
+        let firstLink = base == nil
 
-        func decide(_ field: String, _ time: SyncField, equal: Bool, rChanged: Bool, tChanged: Bool, tiebreak: Side? = nil) -> Side? {
+        func decide(_ field: String, _ time: SyncField, equal: Bool, rChanged: Bool, tChanged: Bool, tiebreak: Side? = nil,
+                    sourceEmpty: Bool = false) -> Side? {
             if equal { return nil }
+            if let source {
+                return (source == .reminders ? rChanged : tChanged) && !(firstLink && sourceEmpty) ? source : nil
+            }
             if rChanged && !tChanged { return .reminders }
             if tChanged && !rChanged { return .things }
             if base != nil { plan.conflicts.append(field) }
@@ -763,7 +877,6 @@ final class SyncPass {
         // stamps every reminder "modified now" on its first poll), so an empty value never replaces
         // a filled one, Things keeps its title casing and its (Markdown) notes when both have text,
         // and completed beats open.
-        let firstLink = base == nil
         // Title
         let titleSide = decide("title", .title, equal: rf.title == tf.title,
                                rChanged: base.map { rf.title != $0.title } ?? true,
@@ -772,24 +885,27 @@ final class SyncPass {
         switch titleSide {
         case .reminders: plan.thingsPatch.title = r.title; plan.fingerprint.title = rf.title
         case .things: plan.reminderPatch.title = t.title; plan.fingerprint.title = tf.title
-        case nil: break
+        case nil: if source == .things { plan.fingerprint.title = tf.title }
         }
         // Due date. On first link a missing date never overrides a real one ("no due date" rule).
         var dueTiebreak: Side?
         if base == nil { if rf.due == nil { dueTiebreak = .things } else if tf.due == nil { dueTiebreak = .reminders } }
         let dueSide = decide("due date", .due, equal: rf.due == tf.due,
                              rChanged: base.map { rf.due != $0.due } ?? true,
-                             tChanged: base.map { tf.due != $0.due } ?? true, tiebreak: dueTiebreak)
+                             tChanged: base.map { tf.due != $0.due } ?? true, tiebreak: dueTiebreak,
+                             sourceEmpty: (source == .reminders ? rf.due : tf.due) == nil)
         switch dueSide {
         case .reminders: plan.thingsPatch.when = .some(r.due); plan.fingerprint.due = rf.due
         case .things: plan.reminderPatch.due = .some(t.due); plan.fingerprint.due = tf.due
-        case nil: break
+        case nil: if source == .things { plan.fingerprint.due = tf.due }
         }
+        plan.fingerprint.undatedThingsDay = plan.fingerprint.due == nil ? undatedDay : nil
         // Completion
         let compSide = decide("completion", .completion, equal: !Fingerprint.completionDiffers(rf, tf),
                               rChanged: base.map { Fingerprint.completionDiffers(rf, $0) } ?? true,
                               tChanged: base.map { Fingerprint.completionDiffers(tf, $0) } ?? true,
-                              tiebreak: firstLink ? (tf.completed || !rf.completed ? .things : .reminders) : nil)
+                              tiebreak: firstLink ? (tf.completed || !rf.completed ? .things : .reminders) : nil,
+                              sourceEmpty: !(source == .reminders ? rf.completed : tf.completed))
         switch compSide {
         case .reminders:
             plan.thingsPatch.completed = r.completed
@@ -800,8 +916,14 @@ final class SyncPass {
             if tf.completed { plan.reminderPatch.completionDate = t.stopDate }
             plan.fingerprint.completed = tf.completed; plan.fingerprint.completionDay = tf.completionDay
         case nil:
-            // Equal: keep whichever side knows the completion day.
-            if plan.fingerprint.completionDay == nil { plan.fingerprint.completionDay = tf.completionDay }
+            if let source, Fingerprint.completionDiffers(rf, tf) {
+                // One way, and only the receiver differs: the fingerprint keeps the source's state.
+                let kept = source == .reminders ? rf : tf
+                plan.fingerprint.completed = kept.completed; plan.fingerprint.completionDay = kept.completionDay
+            } else if plan.fingerprint.completionDay == nil {
+                // Equal: keep whichever side knows the completion day.
+                plan.fingerprint.completionDay = tf.completionDay
+            }
         }
         // Group (section <-> heading). Without section syncing the stored group is left alone. On first link a
         // group beats none, and two different groups go to Things.
@@ -820,11 +942,13 @@ final class SyncPass {
                 var side: Side?
                 if g.remindersReadOnly {
                     // Sections there are read-only: only Reminders can move things, and a missing section on first link says nothing.
-                    if rChanged && !(firstLink && rg == nil) { side = .reminders }
+                    // (One way from Things nothing is written to Things, so such a move is ignored.)
+                    if rChanged && !(firstLink && rg == nil) { if source != .things { side = .reminders } }
                     else if firstLink { plan.fingerprint.group = rg }
                 } else if rChanged || tChanged {
                     side = decide("section", .placement, equal: false, rChanged: rChanged, tChanged: tChanged,
-                                  tiebreak: firstLink ? (rg == nil ? .things : tg == nil ? .reminders : .things) : nil)
+                                  tiebreak: firstLink ? (rg == nil ? .things : tg == nil ? .reminders : .things) : nil,
+                                  sourceEmpty: (source == .reminders ? rg : tg) == nil)
                 }
                 switch side {
                 case .reminders:
@@ -835,7 +959,7 @@ final class SyncPass {
                 }
             }
         }
-        mergeFields(into: &plan, base: base, reminder: r, task: t)
+        mergeFields(into: &plan, base: base, reminder: r, task: t, mapping: mapping)
         return plan
     }
 
@@ -847,7 +971,8 @@ final class SyncPass {
             let sig = signature(m)
             let isFirst = store.linkedMappings[m.id] != sig
             if isFirst && !isFull { continue }
-            let allowCompleted = isFirst && config.includeCompletedOnFirstLink
+            let allowCompleted = isFirst && (m.includeCompletedOnFirstLink ?? config.includeCompletedOnFirstLink)
+            let source = m.direction.source
 
             // Every unlinked item of the list on each side, whatever this pass was started for.
             let taskPool = thingsScope.compactMap { (id, mid) -> ThingsTask? in
@@ -882,8 +1007,9 @@ final class SyncPass {
             // New partners are only made for what this pass covers.
             let taskCandidates = taskPool.filter { !pairedTasks.contains($0.id) && (isFull || targetedIds.contains($0.id)) }
             let reminderCandidates = isFull || remindersChanged ? reminderPool.filter { !pairedReminders.contains($0.id) } : []
-            for r in reminderCandidates { await createThings(from: r, mapping: m, target: target) }
-            for t in taskCandidates { await createReminder(from: t, mapping: m) }
+            // One way, an item made on the receiving side gets no partner and stays unlinked.
+            if source != .things { for r in reminderCandidates { await createThings(from: r, mapping: m, target: target) } }
+            if source != .reminders { for t in taskCandidates { await createReminder(from: t, mapping: m) } }
 
             if isFirst && report.failures == failuresBefore { store.linkedMappings[m.id] = sig }
         }
@@ -894,7 +1020,9 @@ final class SyncPass {
         if sectionsActive(m) {
             groupInput = GroupInput(things: thingsGroup(t, m), reminders: r.section, remindersReadOnly: groceryLists.contains(r.listId))
         }
-        var plan = merge(base: nil, reminder: r, task: t, group: groupInput)
+        var plan = merge(base: nil, reminder: r, task: t, group: groupInput, mapping: m)
+        if let tag = alwaysTagIds[m.id], !t.tagIds.contains(tag) { plan.thingsPatch.addTagIds = (plan.thingsPatch.addTagIds ?? []) + [tag] }
+        enforceDirection(&plan, source: m.direction.source)
         do {
             var linkedReminder = r
             var actual: ReminderItem?
@@ -916,6 +1044,9 @@ final class SyncPass {
             if plan.reminderPatch.notes != nil, !Fingerprint.normalize(r.notes).isEmpty {
                 log(.warning, "\"\(r.title)\" had different notes in Reminders and Things when it was linked; the Things notes were kept and replaced the Reminders notes")
             }
+            if m.direction == .remindersToThings, plan.thingsPatch.notes != nil, !Fingerprint.normalize(t.notes).isEmpty {
+                log(.warning, "\"\(r.title)\" had different notes in Reminders and Things when it was linked; this list syncs one way from Reminders, so the Reminders notes replaced the Things notes")
+            }
         } catch {
             fail("Could not link \"\(r.title)\": \(error.localizedDescription)")
         }
@@ -923,25 +1054,20 @@ final class SyncPass {
 
     func createThings(from r: ReminderItem, mapping m: ListMapping, target: String) async {
         if r.isRepeating { await createThingsForRepeating(from: r, mapping: m); return }
-        var placement: ThingsPlacement
-        var tags: [String] = []
         let group = sectionsActive(m) ? Fingerprint.cleanGroup(r.section) : nil
-        switch m.mode {
-        case .project: placement = .project(target)
-        case .area: placement = .area(target)
-        case .tag: placement = .inbox; tags = [target]
-        case .heading: placement = .heading(target)
-        }
         do {
-            if let group { placement = try await self.placement(forGroup: group, in: m) }
-            let fields = thingsFields(from: r)
-            let draft = ThingsTodoDraft(title: r.title, notes: fields.notes, when: r.due, completed: r.completed,
+            let (placement, tags) = try await thingsPlacement(for: m, group: group)
+            let fields = thingsFields(from: r, mapping: m)
+            let start = arrival(of: r, in: m)
+            let draft = ThingsTodoDraft(title: r.title, notes: fields.notes, when: start.when, completed: r.completed,
                                         completionDate: r.completionDate, placement: placement,
-                                        tagIds: tags + fields.tagIds.filter { !tags.contains($0) }, checklist: fields.checklist)
+                                        tagIds: tags + fields.tagIds.filter { !tags.contains($0) }, checklist: fields.checklist,
+                                        someday: start.someday)
             let id = try await things.createTodo(draft)
+            var fp = fingerprint(forNewThingsFrom: r, group: group, fields: fields)
+            fp.undatedThingsDay = start.undatedDay
             store.links.append(LinkRecord(reminderId: r.id, reminderExternalId: r.externalId, thingsId: id, mappingId: m.id,
-                                          fingerprint: fingerprint(forNewThingsFrom: r, group: group, fields: fields),
-                                          copySide: .things, copiedCompleted: r.completed))
+                                          fingerprint: fp, copySide: .things, copiedCompleted: r.completed))
             report.createdInThings += 1
             log(.change, "Created Things to-do \"\(r.title)\" from list \"\(m.listTitle)\"")
         } catch {
@@ -980,6 +1106,7 @@ final class SyncPass {
                                           fingerprint: fingerprint, copySide: .reminders, copiedCompleted: done))
             report.createdInReminders += 1
             log(.change, "Created reminder \"\(t.title)\" in \"\(m.listTitle)\"")
+            await addAlwaysTag(to: t, mapping: m)
         } catch {
             fail("Could not create reminder \"\(t.title)\": \(error.localizedDescription)")
         }
@@ -1029,7 +1156,8 @@ final class SyncPass {
         // remnants. removeOwnedIfEmpty refuses targeted, non-empty, and user-created containers.
         if !store.ownedThings.isEmpty, let fresh = try? await things.refresh() {
             snapshot = fresh.snapshot
-            for entry in store.ownedThings {
+            let paused = config.pausedListIds
+            for entry in store.ownedThings where !paused.contains(entry.mappingId) {   // a paused list is left alone
                 await removeOwnedIfEmpty(entry.kind, id: entry.id,
                                          why: entry.kind == .heading ? "it held no to-dos" : "no list syncs to it and it is empty")
             }

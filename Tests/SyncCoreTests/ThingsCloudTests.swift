@@ -315,3 +315,23 @@ struct ThingsCloudClientTests {
         #expect(cloud.requests.isEmpty)
     }
 }
+
+@Suite("ThingsCloud Someday create")
+struct ThingsCloudSomedayTests {
+    @Test func aSomedayCreateWritesStTwoWithNoDate() async throws {
+        // The JavaScript client's `when: "someday"`: {st: 2, sb: 0, sr: null, tir: null}.
+        let project = ThingsID.generate()
+        let cloud = FakeThingsCloud(items: [projectItem(project)])
+        let client = cloud.client()
+        let plainId = try await client.createTodo(ThingsTodoDraft(title: "plain", placement: .project(project)))
+        let plain = try #require(try cloud.commitBody(0)[plainId]?["p"]?.object)
+        let id = try await client.createTodo(ThingsTodoDraft(title: "later", placement: .project(project), someday: true))
+        let p = try #require(try cloud.commitBody(1)[id]?["p"]?.object)
+        #expect(Set(p.keys) == Set(plain.keys))
+        #expect(p["st"] == 2 && p["sb"] == 0 && p["sr"] == .null && p["tir"] == .null && p["ato"] == .null)
+        #expect(plain["st"] == 1, "without the flag a to-do in a project is Anytime, as before")
+        // A date wins over the flag.
+        let dated = try await client.createTodo(ThingsTodoDraft(title: "dated", when: DueDate(day: "2026-11-08"), placement: .project(project), someday: true))
+        #expect(try cloud.commitBody(2)[dated]?["p"]?["sr"] == 1_794_096_000)
+    }
+}

@@ -88,6 +88,9 @@ enum ThingsChanges {
 
     static let inboxScheduling: [String: JSONValue] = ["st": 0, "sb": 0, "sr": nil, "tir": nil, "ato": nil]
 
+    /// Someday with no date, as the JavaScript client writes `when: "someday"`: `st` 2 with `sr` and `tir` null.
+    static let somedayScheduling: [String: JSONValue] = ["st": 2, "sb": 0, "sr": nil, "tir": nil, "ato": nil]
+
     /// Container keys for a placement. A to-do in a project carries no area.
     static func containers(_ placement: ThingsPlacement) -> [String: JSONValue] {
         switch placement {
@@ -137,11 +140,17 @@ enum ThingsChanges {
         return ["st": 2, "sb": 0, "sr": nil, "tir": .number(ts), "icsd": .number(ts), "ato": ato]
     }
 
-    /// The three entries Things 3.24.2 wrote for Items > Repeat > Stop (docs/RECURRENCE.md), as one change map: a plain
+    /// A checklist item of a template being stopped: its id, the id of its copy, and what the copy carries over.
+    struct StopChecklistItem { var id: String; var newId: String; var title: String; var status: Int; var stopDate: Double? }
+
+    /// The entries Things 3.24.2 wrote for Items > Repeat > Stop (docs/RECURRENCE.md), as one change map: a plain
     /// to-do for the template's next day (`sr` = `tir` = that day, `st` 2, `lt` true, `md` null), `rt []` and nothing
-    /// else on each open occurrence, and a tombstone for the template. Title, notes, tags and container are the template's.
+    /// else on each open occurrence, and a tombstone for the template. Title, notes, tags and container are the
+    /// template's. Each checklist item of the template (`checklist`, in order) is created again for the new to-do
+    /// (`lt` true, `md` null, `cd` the new to-do's, `ix` 0, 1, ..., `ss` and `sp` the item's own) and the template's
+    /// own item is tombstoned.
     static func stopRepeating(templateId: String, template: ThingsTask, tags: [String], openOccurrences: [String],
-                              newId: String, now: Date) throws -> ThingsChangeMap {
+                              checklist: [StopChecklistItem] = [], newId: String, now: Date) throws -> ThingsChangeMap {
         guard let day = template.nextDay else {
             throw ThingsCloudError.invalidChange(["repeating to-do \(templateId) has no next day, so there is nothing to continue as a plain to-do"])
         }
@@ -154,6 +163,13 @@ enum ThingsChanges {
             tags: tags, completed: false, completionDate: nil, now: now, extra: ["lt": true, "md": nil])
         var map: ThingsChangeMap = [newId: plain, templateId: ThingsChange(t: 2, e: ThingsEntity.task, p: [:])]
         for id in openOccurrences { map[id] = ThingsChange(t: 1, e: ThingsEntity.task, p: ["rt": []]) }
+        for (i, item) in checklist.enumerated() {
+            map[item.newId] = ThingsChange(t: 0, e: ThingsEntity.checklistItem, p: [
+                "ix": .number(Double(i)), "cd": .number(now.timeIntervalSince1970), "ts": idArray([newId]), "sp": number(item.stopDate),
+                "ss": .number(Double(item.status)), "xx": emptyXX, "tt": .string(item.title), "md": nil, "lt": true,
+            ])
+            map[item.id] = checklistDelete()
+        }
         return map
     }
 

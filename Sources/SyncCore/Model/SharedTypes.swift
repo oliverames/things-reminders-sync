@@ -185,9 +185,11 @@ public struct ThingsTodoPatch: Codable, Hashable, Sendable {
     public var addTagIds: [String]?
     public var removeTagIds: [String]?
     public var trashed: Bool?
-    /// Templates only: replaces the repeat rule (`rr`), keeping the template's existing anchors.
+    /// Templates only: replaces the repeat rule (`rr`). The old rule's `sr` is kept and `ia` becomes the template's
+    /// next day before the edit, as Things writes it (docs/RECURRENCE.md).
     public var recurrence: RepeatRule?
-    /// Templates only: moves the next occurrence (`tir`, `icsd`) and sets the reminder time (`ato`).
+    /// Templates only: moves the next occurrence (`tir`, `icsd`). The reminder time (`ato`) is written only when
+    /// `minutes` differs from the template's current time.
     public var templateNext: DueDate?
     /// Templates only: sets the reminder time of future occurrences (`ato` alone); `.some(nil)` removes it.
     public var templateMinutes: Int??
@@ -228,11 +230,13 @@ public struct ThingsTodoDraft: Codable, Hashable, Sendable {
     public var recurrence: RepeatRule?
     /// Checklist items to create with the to-do (empty unless `SyncConfig.syncChecklists` is on).
     public var checklist: [ThingsChecklistDraft]
+    /// With no `when`: create the to-do in Someday (`st` 2 with no date) instead of Anytime or the Inbox.
+    public var someday: Bool
 
     public init(title: String, notes: String = "", when: DueDate? = nil, completed: Bool = false,
                 completionDate: Date? = nil, placement: ThingsPlacement = .inbox, tagIds: [String] = [],
-                recurrence: RepeatRule? = nil, checklist: [ThingsChecklistDraft] = []) {
-        self.checklist = checklist
+                recurrence: RepeatRule? = nil, checklist: [ThingsChecklistDraft] = [], someday: Bool = false) {
+        self.checklist = checklist; self.someday = someday
         self.title = title; self.notes = notes; self.when = when; self.completed = completed
         self.completionDate = completionDate; self.placement = placement; self.tagIds = tagIds
         self.recurrence = recurrence
@@ -266,6 +270,15 @@ public struct ThingsRefreshResult: Sendable {
     }
 }
 
+/// What `ThingsBackend.stopRepeating` made.
+public struct ThingsStopResult: Hashable, Sendable {
+    /// The plain to-do for the template's next day.
+    public var todoId: String
+    /// Id of each checklist item the template had -> id of its copy on the new to-do.
+    public var checklistIds: [String: String]
+    public init(todoId: String, checklistIds: [String: String] = [:]) { self.todoId = todoId; self.checklistIds = checklistIds }
+}
+
 /// The Things side as the engine sees it. `ThingsCloudClient` implements it; tests use a fake.
 public protocol ThingsBackend: Sendable {
     /// Checks the server head (one cheap request) and pulls only new history items.
@@ -275,8 +288,9 @@ public protocol ThingsBackend: Sendable {
     func updateTodo(id: String, patch: ThingsTodoPatch) async throws
     /// Stops a repeating template the way Things' own Stop does (docs/RECURRENCE.md), in one commit: the template is
     /// deleted for good, its open occurrences are detached, and a plain to-do is created for the template's next day
-    /// with its title, notes, tags and container. Returns the id of that plain to-do.
-    func stopRepeating(templateId: String) async throws -> String
+    /// with its title, notes, tags and container, each of the template's checklist items is created again on that
+    /// to-do, and the template's own checklist items are deleted. Returns the new to-do and its checklist item ids.
+    func stopRepeating(templateId: String) async throws -> ThingsStopResult
     func createProject(title: String, areaId: String?) async throws -> String
     /// Creates a heading inside a project (Anytime) and returns its id.
     func createHeading(title: String, projectId: String) async throws -> String
@@ -466,6 +480,30 @@ public enum MappingMode: String, Codable, CaseIterable, Sendable {
     case heading
 }
 
+/// Which way a list syncs. In a one-way mode the first side named is the source and the other the receiver: the app
+/// never writes to the source, and a change made on the receiver is ignored until the source changes that field.
+public enum SyncDirection: String, Codable, CaseIterable, Sendable {
+    case twoWay, remindersToThings, thingsToReminders
+
+    /// The side changes come from, or nil when both sides sync.
+    public var source: Side? {
+        switch self {
+        case .twoWay: return nil
+        case .remindersToThings: return .reminders
+        case .thingsToReminders: return .things
+        }
+    }
+}
+
+/// Where a reminder with no due date lands in Things when its to-do is created.
+public enum UndatedArrival: String, Codable, CaseIterable, Sendable {
+    /// Anytime (the Inbox for a tag-mode list), as before this setting existed.
+    case anytime
+    case someday
+    /// Today: the to-do gets today as its start day. The reminder gets no due date from it.
+    case today
+}
+
 public struct ListMapping: Codable, Hashable, Sendable, Identifiable {
     /// Reminders list id (RemCTL numeric list id).
     public var id: String
@@ -485,17 +523,39 @@ public struct ListMapping: Codable, Hashable, Sendable, Identifiable {
     public var parentProjectId: String?
     /// For `.project` mode: mirror the reminder's section as the to-do's heading. Ignored in other modes.
     public var syncSections: Bool
+    // Per-list preferences (docs/SPEC.md, "Per-list preferences"). Every one is optional in config.json and its
+    // default is how the app behaved before the preference existed.
+    /// Two-way, or one-way from one side to the other.
+    public var direction: SyncDirection
+    /// A paused list keeps its links and is left alone by passes, polls and cleanup.
+    public var paused: Bool
+    /// Overrides `SyncConfig.propagateDeletes` for this list; nil follows the global setting.
+    public var propagateDeletes: Bool?
+    /// Where a reminder with no due date lands in Things when its to-do is created.
+    public var undatedArriveAs: UndatedArrival
+    /// Title of an existing Things tag put on every to-do linked through this list; nil or blank for none.
+    public var alwaysTag: String?
+    /// Overrides `SyncConfig.includeCompletedOnFirstLink` for this list; nil follows the global setting.
+    public var includeCompletedOnFirstLink: Bool?
+    /// Overrides `SyncConfig.syncChecklists` for this list; nil follows the global setting.
+    public var syncChecklists: Bool?
 
     public init(id: String, listTitle: String, enabled: Bool = true, mode: MappingMode = .project,
                 targetId: String? = nil, targetTitle: String, projectAreaId: String? = nil, awaitingTarget: Bool = false,
-                parentProjectId: String? = nil, syncSections: Bool = true) {
+                parentProjectId: String? = nil, syncSections: Bool = true, direction: SyncDirection = .twoWay,
+                paused: Bool = false, propagateDeletes: Bool? = nil, undatedArriveAs: UndatedArrival = .anytime,
+                alwaysTag: String? = nil, includeCompletedOnFirstLink: Bool? = nil, syncChecklists: Bool? = nil) {
         self.id = id; self.listTitle = listTitle; self.enabled = enabled; self.mode = mode
         self.targetId = targetId; self.targetTitle = targetTitle; self.projectAreaId = projectAreaId
         self.awaitingTarget = awaitingTarget; self.parentProjectId = parentProjectId; self.syncSections = syncSections
+        self.direction = direction; self.paused = paused; self.propagateDeletes = propagateDeletes
+        self.undatedArriveAs = undatedArriveAs; self.alwaysTag = alwaysTag
+        self.includeCompletedOnFirstLink = includeCompletedOnFirstLink; self.syncChecklists = syncChecklists
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, listTitle, enabled, mode, targetId, targetTitle, projectAreaId, awaitingTarget, parentProjectId, syncSections
+        case direction, paused, propagateDeletes, undatedArriveAs, alwaysTag, includeCompletedOnFirstLink, syncChecklists
     }
 
     public init(from decoder: Decoder) throws {
@@ -510,7 +570,17 @@ public struct ListMapping: Codable, Hashable, Sendable, Identifiable {
         awaitingTarget = try c.decodeIfPresent(Bool.self, forKey: .awaitingTarget) ?? false
         parentProjectId = try c.decodeIfPresent(String.self, forKey: .parentProjectId)
         syncSections = try c.decodeIfPresent(Bool.self, forKey: .syncSections) ?? true
+        direction = try c.decodeIfPresent(SyncDirection.self, forKey: .direction) ?? .twoWay
+        paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? false
+        propagateDeletes = try c.decodeIfPresent(Bool.self, forKey: .propagateDeletes)
+        undatedArriveAs = try c.decodeIfPresent(UndatedArrival.self, forKey: .undatedArriveAs) ?? .anytime
+        alwaysTag = try c.decodeIfPresent(String.self, forKey: .alwaysTag)
+        includeCompletedOnFirstLink = try c.decodeIfPresent(Bool.self, forKey: .includeCompletedOnFirstLink)
+        syncChecklists = try c.decodeIfPresent(Bool.self, forKey: .syncChecklists)
     }
+
+    /// True when the list takes part in sync passes and polls: enabled, not paused, and with a target chosen.
+    public var isLive: Bool { enabled && !paused && !awaitingTarget }
 }
 
 public struct SyncConfig: Codable, Hashable, Sendable {

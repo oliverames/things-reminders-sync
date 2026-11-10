@@ -65,7 +65,8 @@ extension SyncPass {
     // MARK: Existing template pair
 
     /// Due, completion and rule of a template pair (title, notes and group are already in `plan`).
-    func templateExtras(link: LinkRecord, reminder r: ReminderItem, task t: ThingsTask, plan: inout MergePlan) {
+    /// In a one-way list (`source`) only the source's due, completion and rule are copied; see `SyncPass.merge`.
+    func templateExtras(link: LinkRecord, reminder r: ReminderItem, task t: ThingsTask, plan: inout MergePlan, source: Side? = nil) {
         let baseFP = link.fingerprint
         let base = baseFP.due
         let rDue = r.due
@@ -76,7 +77,7 @@ extension SyncPass {
 
         if r.completed {
             // The reminder finished for good (its last occurrence): finish the open occurrence for its day.
-            if !baseFP.completed {
+            if !baseFP.completed, source != .things {
                 if let day = base?.day ?? rDue?.day, let o = occurrences.first(where: { $0.startDate == day }) ?? occurrences.first {
                     plan.occurrenceWrites.append((o.id, ThingsTodoPatch(completed: true)))
                 }
@@ -84,7 +85,7 @@ extension SyncPass {
             }
         } else if let base, !baseFP.completed {
             let reminderMoved = rDue != base
-            if !reminderMoved, completedOccurrence(of: t.id, on: base.day) != nil {
+            if !reminderMoved, source != .reminders, completedOccurrence(of: t.id, on: base.day) != nil {
                 // Things completed the occurrence: the reminder advances itself. Never pass a completion date.
                 plan.reminderPatch.completed = true
                 plan.reminderAdvances = true
@@ -92,7 +93,8 @@ extension SyncPass {
                 let observed = observedThingsDue(t)
                 let thingsMoved = observed != nil && observed != base
                 var side: Side?
-                if reminderMoved && thingsMoved { side = laterDue } else if reminderMoved { side = .reminders } else if thingsMoved { side = .things }
+                if let source { side = (source == .reminders ? reminderMoved : thingsMoved) ? source : nil }
+                else if reminderMoved && thingsMoved { side = laterDue } else if reminderMoved { side = .reminders } else if thingsMoved { side = .things }
                 switch side {
                 case .reminders:
                     if isAdvance(rule: r.recurrence ?? t.recurrence, base: base, to: rDue) {
@@ -124,27 +126,41 @@ extension SyncPass {
             fp.due = rDue
         }
 
-        // Rule: only when both sides' rules are known shapes.
-        if let rRule = r.recurrence, let tRule = t.recurrence {
+        // Rule: only rules of a known shape are copied.
+        func ruleToThings(_ rule: RepeatRule) {
+            if ThingsRepeat.rr(for: rule, start: rDue?.day ?? t.nextDay ?? "2026-01-01") != nil {
+                plan.thingsPatch.recurrence = rule; fp.rule = rule
+            } else {
+                log(.info, "\"\(t.title)\": the reminder's new repeat rule has no verified Things form; the Things rule was left as it is")
+                fp.rule = nil
+            }
+        }
+        func ruleToReminders(_ rule: RepeatRule) {
+            if RemCTLRecurrence.spec(for: rule, due: rDue ?? templateDue(t)) != nil {
+                plan.reminderPatch.recurrence = .some(rule); fp.rule = rule
+            } else {
+                log(.info, "\"\(t.title)\": the new Things repeat rule cannot be written to Reminders; the reminder's rule was left as it is")
+                fp.rule = nil
+            }
+        }
+        if let source {
+            // One way: the source's rule is copied when it changed since the agreed rule. A rule only the receiver
+            // changed (or a repeat the reminder lost) is ignored, and the agreed rule stays the source's.
+            let s = source == .reminders ? r.recurrence : t.recurrence, v = source == .reminders ? t.recurrence : r.recurrence
+            if let s {
+                if s.key == v?.key { fp.rule = t.recurrence ?? s }
+                else if let baseRule = baseFP.rule, s.key != baseRule.key {
+                    if source == .reminders { ruleToThings(s) } else { ruleToReminders(s) }
+                }
+            }
+        } else if let rRule = r.recurrence, let tRule = t.recurrence {
             if let baseRule = baseFP.rule {
                 if rRule.key != tRule.key {
                     let rChanged = rRule.key != baseRule.key, tChanged = tRule.key != baseRule.key
                     let side: Side = rChanged && !tChanged ? .reminders : tChanged && !rChanged ? .things : laterSide(.rule, r, t)
                     switch side {
-                    case .reminders:
-                        if ThingsRepeat.rr(for: rRule, start: rDue?.day ?? t.nextDay ?? "2026-01-01") != nil {
-                            plan.thingsPatch.recurrence = rRule; fp.rule = rRule
-                        } else {
-                            log(.info, "\"\(t.title)\": the reminder's new repeat rule has no verified Things form; the Things rule was left as it is")
-                            fp.rule = nil
-                        }
-                    case .things:
-                        if RemCTLRecurrence.spec(for: tRule, due: rDue ?? templateDue(t)) != nil {
-                            plan.reminderPatch.recurrence = .some(tRule); fp.rule = tRule
-                        } else {
-                            log(.info, "\"\(t.title)\": the new Things repeat rule cannot be written to Reminders; the reminder's rule was left as it is")
-                            fp.rule = nil
-                        }
+                    case .reminders: ruleToThings(rRule)
+                    case .things: ruleToReminders(tRule)
                     }
                 } else {
                     fp.rule = tRule
@@ -168,18 +184,36 @@ extension SyncPass {
         let seed = Fingerprint(title: Fingerprint.normalize(r.title), notes: Fingerprint.normalize(r.notes), due: r.due,
                                completed: false, completionDay: nil)
         let (rEff, tEff) = neutralized(reminder: r, task: t, base: seed)
-        var plan = merge(base: nil, reminder: rEff, task: tEff, group: groupInput)
+        let source = m.direction.source
+        var plan = merge(base: nil, reminder: rEff, task: tEff, group: groupInput, mapping: m)
         plan.fingerprint.due = r.due; plan.fingerprint.completed = false; plan.fingerprint.completionDay = nil
-        if let observed = observedThingsDue(t), observed != r.due {
-            plan.reminderPatch.due = .some(observed); plan.fingerprint.due = observed
-        }
-        if let rRule = r.recurrence, let tRule = t.recurrence {
-            plan.fingerprint.rule = tRule
-            if rRule.key != tRule.key {
-                if RemCTLRecurrence.spec(for: tRule, due: plan.fingerprint.due) != nil { plan.reminderPatch.recurrence = .some(tRule) }
-                else { plan.fingerprint.rule = nil }
+        var occurrenceMove: (id: String, patch: ThingsTodoPatch)?
+        if source == .reminders {
+            // One way from Reminders: the reminder's date and rule go to Things, and the reminder is not written.
+            if let rDue = r.due, let observed = observedThingsDue(t), observed != rDue {
+                if let o = openOccurrences(of: t.id).first { occurrenceMove = (o.id, ThingsTodoPatch(when: .some(rDue))) }
+                else { plan.thingsPatch.templateNext = rDue }
+            }
+            if let rRule = r.recurrence, let tRule = t.recurrence {
+                if rRule.key == tRule.key { plan.fingerprint.rule = tRule }
+                else if ThingsRepeat.rr(for: rRule, start: r.due?.day ?? t.nextDay ?? "2026-01-01") != nil {
+                    plan.thingsPatch.recurrence = rRule; plan.fingerprint.rule = rRule
+                }
+            }
+        } else {
+            if let observed = observedThingsDue(t), observed != r.due {
+                plan.reminderPatch.due = .some(observed); plan.fingerprint.due = observed
+            }
+            if let rRule = r.recurrence, let tRule = t.recurrence {
+                plan.fingerprint.rule = tRule
+                if rRule.key != tRule.key {
+                    if RemCTLRecurrence.spec(for: tRule, due: plan.fingerprint.due) != nil { plan.reminderPatch.recurrence = .some(tRule) }
+                    else { plan.fingerprint.rule = nil }
+                }
             }
         }
+        if let tag = alwaysTagIds[m.id], !t.tagIds.contains(tag) { plan.thingsPatch.addTagIds = (plan.thingsPatch.addTagIds ?? []) + [tag] }
+        enforceDirection(&plan, source: source)
         do {
             var linked = r
             var actual: ReminderItem?
@@ -194,6 +228,7 @@ extension SyncPass {
             let afterwards = try await runSubtaskWrites(plan, reminder: linked.id, listId: linked.listId)
             settle(&plan, actual: actual, afterwards: afterwards, title: r.title)
             if !plan.thingsPatch.isEmpty { try await things.updateTodo(id: t.id, patch: plan.thingsPatch) }
+            if let move = occurrenceMove { try await things.updateTodo(id: move.id, patch: move.patch) }
             store.links.append(LinkRecord(reminderId: linked.id, reminderExternalId: linked.externalId ?? r.externalId, thingsId: t.id,
                                           mappingId: m.id, fingerprint: plan.fingerprint, repeatMode: .template))
             report.linked += 1
@@ -217,6 +252,7 @@ extension SyncPass {
         case .heading: placement = .heading(target)
         }
         if let group { placement = try await self.placement(forGroup: group, in: m) }
+        if let tag = alwaysTagIds[m.id], !tags.contains(tag) { tags.append(tag) }
         return (placement, tags)
     }
 
@@ -226,7 +262,7 @@ extension SyncPass {
         let group = sectionsActive(m) ? Fingerprint.cleanGroup(r.section) : nil
         do {
             let (placement, tags) = try await thingsPlacement(for: m, group: group)
-            let fields = thingsFields(from: r)
+            let fields = thingsFields(from: r, mapping: m)
             let allTags = tags + fields.tagIds.filter { !tags.contains($0) }
             var fp = fingerprint(forNewThingsFrom: r, group: group, fields: fields)
             if let rule = r.recurrence, let due = r.due, ThingsRepeat.rr(for: rule, start: due.day) != nil {
@@ -239,8 +275,10 @@ extension SyncPass {
                 log(.change, "Created repeating Things to-do \"\(r.title)\" from list \"\(m.listTitle)\"")
             } else {
                 log(.info, "\"\(r.title)\" repeats in Reminders in a way Things cannot hold; Things gets a plain to-do for the current occurrence")
-                let id = try await things.createTodo(ThingsTodoDraft(title: r.title, notes: fields.notes, when: r.due, placement: placement,
-                                                                     tagIds: allTags, checklist: fields.checklist))
+                let start = arrival(of: r, in: m)
+                let id = try await things.createTodo(ThingsTodoDraft(title: r.title, notes: fields.notes, when: start.when, placement: placement,
+                                                                     tagIds: allTags, checklist: fields.checklist, someday: start.someday))
+                fp.undatedThingsDay = start.undatedDay
                 store.links.append(LinkRecord(reminderId: r.id, reminderExternalId: r.externalId, thingsId: id, mappingId: m.id,
                                               fingerprint: fp, copySide: .things, repeatMode: .reminderRepeats))
                 report.createdInThings += 1
@@ -271,6 +309,7 @@ extension SyncPass {
                                           fingerprint: fp, copySide: .reminders, repeatMode: .template))
             report.createdInReminders += 1
             log(.change, "Created repeating reminder \"\(t.title)\" in \"\(m.listTitle)\"")
+            await addAlwaysTag(to: t, mapping: m)
         } catch {
             fail("Could not create reminder \"\(t.title)\": \(error.localizedDescription)")
         }
@@ -278,7 +317,8 @@ extension SyncPass {
 
     // MARK: `.reminderRepeats` pairs
 
-    func reminderRepeatsPlan(link: LinkRecord, reminder r: ReminderItem, task t: ThingsTask, group: GroupInput?) -> MergePlan {
+    func reminderRepeatsPlan(link: LinkRecord, reminder r: ReminderItem, task t: ThingsTask, group: GroupInput?,
+                             mapping: ListMapping? = nil) -> MergePlan {
         var rEff = r
         var advance = false
         let base = link.fingerprint.due
@@ -286,7 +326,7 @@ extension SyncPass {
             advance = true
             rEff.due = base   // the due change is the advance, not a reschedule
         }
-        var plan = merge(base: link.fingerprint, reminder: rEff, task: t, group: group)
+        var plan = merge(base: link.fingerprint, reminder: rEff, task: t, group: group, mapping: mapping)
         plan.fingerprint.rule = nil
         if advance {
             plan.thingsPatch.completed = true
@@ -309,7 +349,7 @@ extension SyncPass {
         guard let mapping, !r.completed, let due = r.due else { return nil }
         let group = sectionsActive(mapping) ? Fingerprint.cleanGroup(plan.fingerprint.group) : nil
         let (placement, tags) = try await thingsPlacement(for: mapping, group: group)
-        let fields = thingsFields(from: r)
+        let fields = thingsFields(from: r, mapping: mapping)
         var draft = ThingsTodoDraft(title: r.title, notes: fields.notes, when: due, placement: placement,
                                     tagIds: tags + fields.tagIds.filter { !tags.contains($0) }, checklist: fields.checklist)
         var fp = fingerprint(forNewThingsFrom: r, group: group, fields: fields)
@@ -412,13 +452,17 @@ extension SyncPass {
         guard let day = t.nextDay else { throw ThingsCloudError.invalidChange(["\"\(t.title)\" has no next day"]) }
         let open = openOccurrences(of: t.id)
         let mappingId = thingsScope[t.id]
-        let id = try await things.stopRepeating(templateId: t.id)
+        let stopped = try await things.stopRepeating(templateId: t.id)
+        let id = stopped.todoId
 
         var plain = t
         plain.id = id
         plain.isRepeating = false; plain.recurrence = nil; plain.instanceDay = nil; plain.instancesCreated = nil
         plain.start = .someday; plain.startDate = day; plain.reminderSeconds = nil
-        plain.checklist = []
+        // The Stop commit made each checklist item again on the new to-do, under a new id.
+        plain.checklist = t.checklist.compactMap { item in
+            stopped.checklistIds[item.id].map { ThingsChecklistItem(id: $0, title: item.title, completed: item.completed, index: item.index) }
+        }
         plain.creationDate = Date(); plain.modificationDate = nil; plain.fieldModified = nil
         snapshot.tasks[t.id] = nil
         snapshot.tasks[id] = plain
@@ -432,14 +476,13 @@ extension SyncPass {
         updated.repeatMode = nil
         updated.fingerprint.rule = nil
         updated.fingerprint.completed = false; updated.fingerprint.completionDay = nil
-        // No agreed items: the next merge adds what either side lacks and removes nothing.
-        updated.fingerprint.checklist = nil
         updated.lastSynced = Date()
         report.updatedInThings += 1
 
         let onDueDay = open.filter { $0.startDate != nil && $0.startDate == reminder.due?.day }
         guard let pick = onDueDay.count == 1 ? onDueDay[0] : open.first, let kept = snapshot.tasks[pick.id] else {
-            // What the new to-do holds: the template's next day with no time.
+            // What the new to-do holds: the template's next day with no time, and the template's checklist (so the
+            // agreed checklist items stay agreed).
             thingsScope[id] = mappingId
             updated.thingsId = id
             updated.fingerprint.due = DueDate(day: day)
@@ -450,8 +493,10 @@ extension SyncPass {
 
         // The link is saved on the occurrence before the trash write, so a failure there cannot leave it on the
         // deleted template. The fingerprint holds the occurrence's own title and date: where the reminder differs,
-        // that is a change from Reminders.
+        // that is a change from Reminders. The occurrence has a checklist of its own, so no items are agreed yet:
+        // the merge adds what either side lacks and removes nothing.
         thingsScope[kept.id] = mappingId
+        updated.fingerprint.checklist = nil
         updated.thingsId = kept.id
         updated.fingerprint.title = Fingerprint.normalize(kept.title)
         updated.fingerprint.due = kept.due
@@ -505,9 +550,8 @@ extension SyncPass {
             updated.fingerprint.rule = nil
             updated.fingerprint.due = r.due
             updated.fingerprint.completed = false; updated.fingerprint.completionDay = nil
-            // Whether Things copies a template's checklist to this to-do is not known: with no agreed items, the next
-            // pass adds what either side lacks and removes nothing.
-            updated.fingerprint.checklist = nil
+            // Things made the template's checklist items again on this to-do (docs/RECURRENCE.md), so the agreed
+            // items still hold and the next pass merges the checklist as usual.
             updated.lastSynced = Date()
             replace(updated)
             log(.change, "\"\(plain.title)\" stopped repeating in Things; its reminder no longer repeats")

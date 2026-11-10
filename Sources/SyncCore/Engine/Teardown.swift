@@ -70,6 +70,13 @@ enum Teardown {
         return out
     }
 
+    /// The links "remove completed copies" may look at: not those of a paused list (it is left alone) and not those of
+    /// a list that itself asks for completed items (`ListMapping.includeCompletedOnFirstLink` true).
+    static func completedCopyLinks(_ store: LinkStore, config: SyncConfig) -> [LinkRecord] {
+        let skip = Set(config.mappings.filter { $0.paused || $0.includeCompletedOnFirstLink == true }.map(\.id))
+        return store.links.filter { !skip.contains($0.mappingId) }
+    }
+
     /// App-created containers of the mapping that would be empty once the given to-dos are gone.
     static func emptyContainers(listId: String, store: LinkStore, config: SyncConfig, snapshot: ThingsSnapshot,
                                 goneThings: Set<String>) -> [OwnedThingsContainer] {
@@ -203,6 +210,7 @@ extension SyncEngine {
             store.links.removeAll { $0.mappingId == listId }
             store.parkedLinks.removeAll { $0.mappingId == listId }
             store.linkedMappings[listId] = nil
+            store.pausedMappings.remove(listId)
             if removeMapping { newConfig.mappings.remove(at: index) }
             log(.info, removeMapping ? "Removed \"\(mapping.listTitle)\" from sync" : "Stopped syncing \"\(mapping.listTitle)\"")
         }
@@ -221,7 +229,8 @@ extension SyncEngine {
         var snapshot = try await things.refresh().snapshot
         let lists = try await reminders.lists()
         var items = try await reminders.reminders(inLists: lists.map(\.id))
-        let copies = Teardown.copies(of: store.links, snapshot: snapshot, reminders: items, onlyCompleted: true)
+        let copies = Teardown.copies(of: Teardown.completedCopyLinks(store, config: config), snapshot: snapshot, reminders: items,
+                                     onlyCompleted: true)
         func fail(_ message: String) {
             report.failures += 1
             if report.firstFailure == nil { report.firstFailure = message }

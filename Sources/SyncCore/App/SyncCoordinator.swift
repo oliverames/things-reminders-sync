@@ -212,8 +212,7 @@ public final class SyncCoordinator {
     public func stopSyncing(listId: String, removeCopies: Bool, removeMapping: Bool) async {
         guard let things = thingsBackend, remindersAccess == .granted else { return }
         await exclusive {
-            let sectionLists = config.mappings.filter { $0.enabled && !$0.awaitingTarget && $0.mode == .project && $0.syncSections }.map(\.id)
-            await deps.remctl?.setSectionLists(sectionLists + [listId])   // the list's sections must be readable to find empty ones
+            await deps.remctl?.setSectionLists(config.sectionListIds + [listId])   // the list's sections must be readable to find empty ones
             do {
                 let engine = SyncEngine(things: things, reminders: deps.reminders)
                 let report = try await engine.teardown(config: config, links: links, listId: listId,
@@ -230,7 +229,8 @@ public final class SyncCoordinator {
 
     /// Copies the app made because "include completed on first link" was on (see `removeCompletedCopies`).
     public func completedCopiesPreview() -> CompletedCopiesPreview {
-        let c = Teardown.copies(of: links.links, snapshot: lastSnapshot, reminders: lastReminders, onlyCompleted: true)
+        let c = Teardown.copies(of: Teardown.completedCopyLinks(links, config: config), snapshot: lastSnapshot, reminders: lastReminders,
+                                onlyCompleted: true)
         return CompletedCopiesPreview(thingsTodosToTrash: c.things.count, remindersToDelete: c.reminders.count)
     }
 
@@ -278,9 +278,10 @@ public final class SyncCoordinator {
     private func applyRemindersConfig() async {
         guard let remctl = deps.remctl else { return }
         await remctl.configure(executablePath: config.remctlPath, pollSeconds: config.remindersPollSeconds)
-        await remctl.setWatchedLists(config.mappings.filter(\.enabled).map(\.id))
+        // A paused list is not watched, so a change in it starts no pass.
+        await remctl.setWatchedLists(config.watchedListIds)
         // Sections are only read for project-mode lists that mirror them as headings.
-        await remctl.setSectionLists(config.mappings.filter { $0.enabled && !$0.awaitingTarget && $0.mode == .project && $0.syncSections }.map(\.id))
+        await remctl.setSectionLists(config.sectionListIds)
     }
 
     private func refreshRemindersDetail() async {

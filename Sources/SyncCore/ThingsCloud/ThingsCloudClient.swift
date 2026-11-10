@@ -181,7 +181,9 @@ public actor ThingsCloudClient: ThingsBackend {
                 return id
             }
             let scheduling: [String: JSONValue]
-            if draft.when == nil, case .inbox = draft.placement {
+            if draft.when == nil, draft.someday {
+                scheduling = ThingsChanges.somedayScheduling
+            } else if draft.when == nil, case .inbox = draft.placement {
                 scheduling = ThingsChanges.inboxScheduling
             } else {
                 scheduling = try ThingsChanges.scheduling(draft.when, today: today())
@@ -318,13 +320,13 @@ public actor ThingsCloudClient: ThingsBackend {
                 throw ThingsCloudError.invalidChange(["to-do \(id) is not a repeating template"])
             }
             if let rule = patch.recurrence {
-                // As Things 3.24.2 wrote a rule edit (docs/RECURRENCE.md): `sr` stays the old rule's, `ia` becomes the
-                // template's current next day (`tir`), and nothing but `md` and `rr` is written. An edit that also moves
-                // the next day (`templateNext`) was not sampled; there the old `ia` is kept, which is this app's own choice.
+                // As Things 3.24.2 wrote a rule edit (docs/RECURRENCE.md): `sr` stays the old rule's and `ia` becomes the
+                // next day (`tir`) the template had before the edit. An edit that leaves the next day alone writes nothing
+                // but `md` and `rr`; one that moves it (`templateNext`, below) also writes `tir` and `icsd`.
                 let o = row.rawRule?.object
                 var anchors: (ia: Double, sr: Double)?
                 if o?["tp"]?.int == 0, let ia = o?["ia"]?.double, let sr = o?["sr"]?.double {
-                    let tir = patch.templateNext == nil ? row.task.nextDay.flatMap { try? ThingsDates.timestamp(forDay: $0) } : nil
+                    let tir = row.task.nextDay.flatMap { try? ThingsDates.timestamp(forDay: $0) }
                     anchors = (tir ?? ia, sr)
                 }
                 let start = row.task.nextDay ?? current.startDate ?? today()
@@ -345,7 +347,10 @@ public actor ThingsCloudClient: ThingsBackend {
             }
             if let next = patch.templateNext {
                 let scheduling = try ThingsChanges.templateScheduling(next)
-                p["tir"] = scheduling["tir"]; p["icsd"] = scheduling["icsd"]; p["ato"] = scheduling["ato"]
+                p["tir"] = scheduling["tir"]; p["icsd"] = scheduling["icsd"]
+                // The sampled edit shows no `ato`. It is written only when the reminder time itself changes with the
+                // day, which is this app's own combination of the two edits.
+                if next.reminderSeconds != current.reminderSeconds { p["ato"] = scheduling["ato"] }
             }
         }
         var map: ThingsChangeMap = [id: ThingsChange(t: 1, e: ThingsEntity.task, p: p)]
@@ -355,23 +360,25 @@ public actor ThingsCloudClient: ThingsBackend {
         return map
     }
 
-    public func stopRepeating(templateId id: String) async throws -> String {
+    public func stopRepeating(templateId id: String) async throws -> ThingsStopResult {
         try await withLock {
-            // The open occurrences are read from the database, so it has to be current.
+            // The open occurrences and the checklist are read from the database, so it has to be current.
             try await pull()
             let newId = ThingsID.generate()
+            var built = try stopChanges(id: id, newId: newId)
             do {
-                try await commit(try stopChanges(id: id, newId: newId), retryStale: false)
+                try await commit(built.map, retryStale: false)
             } catch ThingsCloudError.http(let status, _) where status == 409 || status == 412 {
                 // Another client committed in between (Things may just have made an occurrence): build it again.
                 try await pull()
-                try await commit(try stopChanges(id: id, newId: newId))
+                built = try stopChanges(id: id, newId: newId)
+                try await commit(built.map)
             }
-            return newId
+            return ThingsStopResult(todoId: newId, checklistIds: built.checklistIds)
         }
     }
 
-    private func stopChanges(id: String, newId: String) throws -> ThingsChangeMap {
+    private func stopChanges(id: String, newId: String) throws -> (map: ThingsChangeMap, checklistIds: [String: String]) {
         guard let db = database, let row = db.tasks[id], row.hasRule, !row.task.trashed else {
             throw ThingsCloudError.notFound("repeating to-do \(id)")
         }
@@ -379,8 +386,13 @@ public actor ThingsCloudClient: ThingsBackend {
         for (oid, o) in db.tasks where o.task.templateId == id && o.task.kind == .todo && o.task.status == .open && !o.task.trashed {
             open.append(oid)
         }
-        return try ThingsChanges.stopRepeating(templateId: id, template: row.task, tags: row.task.tagIds.filter { db.tags[$0] != nil },
-                                               openOccurrences: open, newId: newId, now: now())
+        let items = db.checklistItems.filter { $0.value.taskId == id }
+            .sorted { ($0.value.item.index, $0.key) < ($1.value.item.index, $1.key) }
+            .map { ThingsChanges.StopChecklistItem(id: $0.key, newId: ThingsID.generate(), title: $0.value.item.title,
+                                                   status: $0.value.status, stopDate: $0.value.stopDate) }
+        let map = try ThingsChanges.stopRepeating(templateId: id, template: row.task, tags: row.task.tagIds.filter { db.tags[$0] != nil },
+                                                  openOccurrences: open, checklist: items, newId: newId, now: now())
+        return (map, Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0.newId) }))
     }
 
     public func createProject(title: String, areaId: String?) async throws -> String {

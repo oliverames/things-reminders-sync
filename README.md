@@ -103,7 +103,7 @@ A repeating reminder pairs with a Things repeating to-do, and the rule syncs bot
 
 You can add a repeat to an item that is already synced. Add it in Things and the reminder gets the same rule. Add it in Reminders and the Things to-do stands for the current occurrence; when you complete it, Things gets a repeating to-do for the rule. A new time for a repeating reminder is written to the Things repeating to-do as well, so later occurrences keep it.
 
-Stop a repeat in either app and the pair carries on as a plain item. Remove the repeat from the reminder and the app stops the Things repeating to-do the way Things does: it leaves a plain to-do, and to-dos Things already made for earlier dates stay in Things. Stop the repeat in Things and the reminder loses its rule and follows the to-do Things keeps for the next date. Pausing a repeat in Things changes nothing in Reminders.
+Stop a repeat in either app and the pair carries on as a plain item. Remove the repeat from the reminder and the app stops the Things repeating to-do the way Things does: it leaves a plain to-do with the same notes, tags and checklist, and to-dos Things already made for earlier dates stay in Things. Stop the repeat in Things and the reminder loses its rule and follows the to-do Things keeps for the next date. Pausing a repeat in Things changes nothing in Reminders.
 
 Some rules only one app can express. Reminders has no "repeat after completion," and RemCTL can't write every rule Reminders supports. When that happens, the app syncs the current occurrence as a plain item and logs why.
 
@@ -130,6 +130,20 @@ Settings live in the app, apart from the flag tag name. These are the defaults:
 | Include completed on first link | Off | | Whether completed items come across when a list is first turned on |
 
 The ranges are what Settings offers. A `config.json` edited by hand is only held to a floor: 1 s for the Reminders poll, 5 s for the Things poll and 1 minute for the full reconcile.
+
+### Per-list settings
+
+Each list can also carry its own settings. Settings has no controls for them yet, so for now they go in that list's entry in `config.json`. Leave one out and the list behaves as it always has.
+
+| Key | Default | What it does |
+|---|---|---|
+| `direction` | `twoWay` | `remindersToThings` or `thingsToReminders` makes the list one-way. The app then never writes to the side the changes come from. If you edit an item on the receiving side, the app leaves your edit alone until that same field changes on the source, and then the source's value replaces it. New items and deletions only travel from the source, so an item you create on the receiving side stays where it is, unlinked. |
+| `paused` | `false` | A paused list keeps its links and the app leaves it alone. When you resume it, edits made in the meantime sync, but an item that went missing on one side isn't treated as a deletion. The pair is unlinked and the surviving item stays. |
+| `propagateDeletes` | follows the global setting | `true` or `false` for this list only. |
+| `undatedArriveAs` | `anytime` | Where a reminder with no due date lands in Things when its to-do is created: `anytime`, `someday` or `today`. It never moves a to-do that already exists, and a to-do that arrives in Today doesn't give the reminder a due date. |
+| `alwaysTag` | none | The name of a Things tag to put on every to-do linked through this list. The tag has to exist already. The app adds it when it creates or links the to-do, never removes it, and never copies it to Reminders. A `thingsToReminders` list ignores it, because the app doesn't write to Things there. |
+| `includeCompletedOnFirstLink` | follows the global setting | `true` or `false` for this list only. |
+| `syncChecklists` | follows the global setting | `true` or `false` for this list only. |
 
 Your Things Cloud password is stored in the macOS Keychain.
 

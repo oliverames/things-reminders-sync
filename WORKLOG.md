@@ -1,5 +1,39 @@
 # Worklog
 
+## 2026-11-09: second repeat samples matched, and per-list preferences in the engine
+
+Two pieces of engine work, no UI. Tests: `swift test --parallel`, 361 passing (was 319). Nothing was run against
+the real apps, and nothing was committed.
+
+Second sampling session (Things 3.24.2, history indexes after 1716; both samples are in `docs/RECURRENCE.md`):
+
+- Rule edit that moves the next day: the client now writes `md`, `rr`, `tir` and `icsd` and nothing else. `rr`
+  keeps the old `sr` and takes `ia` from the `tir` the template had before the edit (it used to keep the old
+  `ia`). `ato` is added only when the reminder time changed in the same edit, which is the app's own combination.
+  `ti` is never written.
+- Stop: `stopRepeating` now creates each of the template's checklist items again on the new to-do with the
+  sampled keys and tombstones the template's own items, in the same commit. Notes and tags were already copied;
+  the sample confirms them, including the notes checksum. `stopRepeating` returns the new checklist item ids
+  (`ThingsStopResult`), so the engine keeps the agreed checklist instead of forgetting it, for a stop made in
+  either app.
+- Not sampled: a completed checklist item on a stopped template (the app carries `ss` and `sp` over), and a
+  template with a reminder time (`ato` stays null as in both samples).
+
+Per-list preferences on `ListMapping` (`docs/SPEC.md`, "Per-list preferences"): `direction`, `paused`,
+`propagateDeletes`, `undatedArriveAs`, `alwaysTag`, `includeCompletedOnFirstLink`, `syncChecklists`. Every key is
+optional and defaults to the old behavior. Tests are in `EnginePerListTests.swift`.
+
+- One-way lists never write to the source. A receiver edit is ignored until the source changes that field.
+- A paused list is skipped by passes, polls and cleanup. `links.json` gained `pausedMappings`, so the first full
+  pass after a resume deletes nothing.
+- `undatedArriveAs: today` needed one new fingerprint field (`undatedThingsDay`), so the to-do's start day is not
+  copied to the reminder as a due date. `someday` uses the JavaScript client's verified `st` 2 shape.
+- Decisions worth knowing: a delete on the receiving side unlinks the pair and the source item is not copied
+  again; a one-way list from Things does not move to-dos on a retarget and ignores `alwaysTag`; a first link in a
+  one-way list writes the source's values but never lets an empty source value clear the receiver's.
+- Known and left alone: when a reminder's rule and due date change together and the new date happens to be the
+  new rule's next occurrence, `templateExtras` still reads it as an advance and completes the open occurrence.
+
 ## 2026-11-09: repeat edits brought in line with new Things samples
 
 Things 3.24.2 was sampled for a checklist reopen, a to-do made repeating, a rule edit, pause and resume, and Stop

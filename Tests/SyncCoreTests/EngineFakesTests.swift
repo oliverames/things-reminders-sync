@@ -38,18 +38,27 @@ actor FakeThings: ThingsBackend {
         }
         var plain = t
         plain.id = newId; plain.isRepeating = false; plain.recurrence = nil; plain.instanceDay = nil; plain.instancesCreated = nil
-        plain.start = .someday; plain.startDate = day; plain.reminderSeconds = nil; plain.checklist = []
+        plain.start = .someday; plain.startDate = day; plain.reminderSeconds = nil
+        // Like Things: every checklist item is made again for the new to-do, under a new id.
+        lastStopChecklistIds = [:]
+        plain.checklist = t.checklist.map { item in
+            let copy = ThingsChecklistItem(id: nextId("CI"), title: item.title, completed: item.completed, index: item.index)
+            lastStopChecklistIds[item.id] = copy.id
+            return copy
+        }
         plain.creationDate = Date(); plain.modificationDate = nil
         tasks[newId] = plain
         return newId
     }
+    private var lastStopChecklistIds: [String: String] = [:]
     private var failStop = false
     func failNextStop() { failStop = true }
-    func stopRepeating(templateId: String) async throws -> String {
+    func stopRepeating(templateId: String) async throws -> ThingsStopResult {
         if failStop { failStop = false; throw Failure() }
         guard tasks[templateId]?.isTemplate == true else { throw Failure() }
         stops.append(templateId)
-        return stopInThings(templateId, newId: nextId("T"))
+        let id = stopInThings(templateId, newId: nextId("T"))
+        return ThingsStopResult(todoId: id, checklistIds: lastStopChecklistIds)
     }
 
     struct Failure: Error {}
@@ -87,7 +96,7 @@ actor FakeThings: ThingsBackend {
         case .area(let a): t.areaId = a
         case .heading(let h): t.headingId = h
         }
-        if let w = d.when { t.startDate = w.day; t.reminderSeconds = w.reminderSeconds }
+        if let w = d.when { t.startDate = w.day; t.reminderSeconds = w.reminderSeconds } else if d.someday { t.start = .someday }
         if d.completed { t.status = .completed; t.stopDate = d.completionDate ?? Date() }
         tasks[id] = t
         return id

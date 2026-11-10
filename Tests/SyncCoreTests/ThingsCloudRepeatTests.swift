@@ -73,18 +73,35 @@ struct ThingsCloudTemplateTests {
         #expect(body == [tpl: ["t": 1, "e": "Task6", "p": ["md": 1_794_186_000, "rr": sampled]]])
     }
 
-    @Test func ruleEditThatAlsoMovesTheNextDayKeepsTheOldAnchor() async throws {
-        // Not sampled from Things: the app's own choice (docs/RECURRENCE.md).
+    @Test func ruleEditThatMovesTheNextDayWritesTheSampledShape() async throws {
+        // Second sampling session: daily with tir = icsd = Tue 2026-11-10, changed to weekly on Friday. Things wrote
+        // {"ti":-543,"rr":{...},"md":<now>,"icsd":1794528000,"tir":1794528000}; `ti` is incidental and is not written.
         let project = ThingsID.generate(), tpl = ThingsID.generate()
         let cloud = FakeThingsCloud(items: [projectItem(project), sampledTemplate(tpl, project: project)])
         let client = cloud.client()
         _ = try await client.refresh()
+        try await client.updateTodo(id: tpl, patch: ThingsTodoPatch(recurrence: RepeatRule(frequency: .weekly, weekdays: [5]),
+                                                                    templateNext: DueDate(day: "2026-11-13")))
+        let sampled = try JSONValue.parse(Data(#"""
+        {"rr":{"of":[{"wd":5}],"rrv":4,"tp":0,"ts":0,"fu":256,"ia":1794268800,"fa":1,"sr":1794182400,"rc":0,"ed":64092211200},"md":1794186000,"icsd":1794528000,"tir":1794528000}
+        """#.utf8))
+        #expect(try cloud.commitBody() == [tpl: ["t": 1, "e": "Task6", "p": sampled]])
+    }
+
+    @Test func ruleEditThatMovesTheNextDayWritesTheTimeOnlyWhenItChanges() async throws {
+        // `ato` with a rule edit is the app's own combination: only when the reminder time changes in the same edit.
+        let project = ThingsID.generate(), tpl = ThingsID.generate()
+        let cloud = FakeThingsCloud(items: [projectItem(project), sampledTemplate(tpl, project: project, ["ato": 32400])])
+        let client = cloud.client()
+        _ = try await client.refresh()
+        let weekly = RepeatRule(frequency: .weekly, weekdays: [5])
+        try await client.updateTodo(id: tpl, patch: ThingsTodoPatch(recurrence: weekly, templateNext: DueDate(day: "2026-11-13", minutes: 540)))
+        #expect(Set(try #require(try cloud.commitBody(0)[tpl]?["p"]?.object).keys) == ["md", "rr", "tir", "icsd"])
         try await client.updateTodo(id: tpl, patch: ThingsTodoPatch(recurrence: RepeatRule(frequency: .weekly, weekdays: [4]),
-                                                                    templateNext: DueDate(day: "2026-11-12")))
-        let p = try #require(try cloud.commitBody()[tpl]?["p"]?.object)
-        #expect(Set(p.keys) == ["md", "rr", "tir", "icsd", "ato"])
-        #expect(p["rr"]?["ia"] == 1_794_182_400 && p["rr"]?["sr"] == 1_794_182_400 && p["rr"]?["of"] == [["wd": 4]])
-        #expect(p["tir"] == 1_794_441_600 && p["icsd"] == 1_794_441_600)
+                                                                    templateNext: DueDate(day: "2026-11-19", minutes: 600)))
+        let p = try #require(try cloud.commitBody(1)[tpl]?["p"]?.object)
+        #expect(Set(p.keys) == ["md", "rr", "tir", "icsd", "ato"] && p["ato"] == 36000)
+        #expect(p["rr"]?["ia"] == 1_794_528_000 && p["rr"]?["sr"] == 1_794_182_400, "ia is the next day before this edit")
     }
 
     // MARK: Stop
@@ -99,7 +116,7 @@ struct ThingsCloudTemplateTests {
         let cloud = FakeThingsCloud(items: [projectItem(project), sampledTemplate(tpl, project: project), occurrence(open),
                                             occurrence(done, ["ss": 3, "sp": 1_794_100_000]), occurrence(trashed, ["tr": true])])
         let client = cloud.client()
-        let newId = try await client.stopRepeating(templateId: tpl)
+        let newId = try await client.stopRepeating(templateId: tpl).todoId
         #expect(cloud.commits.count == 1)
         let body = try cloud.commitBody()
         #expect(Set(body.keys) == [newId, open, tpl], "the plain to-do, the open occurrence and the template; nothing else")
@@ -131,11 +148,69 @@ struct ThingsCloudTemplateTests {
         let cloud = FakeThingsCloud(items: [projectItem(project), headingItem(heading, project: project), tagItem(tag),
                                             sampledTemplate(tpl, project: project, ["pr": [], "agr": [.string(heading)], "tg": [.string(tag)],
                                                                                     "nt": ThingsChanges.noteObject("Bring *water*"), "ato": 32400])])
-        let newId = try await cloud.client().stopRepeating(templateId: tpl)
+        let newId = try await cloud.client().stopRepeating(templateId: tpl).todoId
         let p = try #require(try cloud.commitBody()[newId]?["p"]?.object)
         #expect(p["pr"] == [] && p["agr"] == [.string(heading)] && p["ar"] == [] && p["tg"] == [.string(tag)])
         #expect(p["nt"] == ThingsChanges.noteObject("Bring *water*"))
         #expect(p["ato"] == .null && p["md"] == .null && p["lt"] == true, "the sampled values stay as sampled")
+    }
+
+    @Test func stopOnATemplateWithNotesATagAndChecklistItemsWritesTheSampledCommit() async throws {
+        // Second sampling session ("Stop sample B"): notes, one tag, two checklist items, one open occurrence.
+        let project = "JVH7o2GV7gnw7YsLPKuCZP", tag = "H96sVJwE7VJveAnv7itmux", tpl = "42z5x6HRuXwRLnakSF6teh"
+        let one = "TKnz93jLYf8GVtyVrDmG5e", two = "JSvw5KYxebS5HuDk6u2jz1", occurrence = "2ERKk97mjgwvtiBNL8cYVZ"
+        func item(_ id: String, _ title: String, _ ix: Double, _ extra: [String: JSONValue] = [:]) -> JSONValue {
+            taskItem(id, ["tt": .string(title), "ss": 0, "sp": nil, "ix": .number(ix), "ts": [.string(tpl)], "lt": false, "cd": 1_794_270_000,
+                          "md": 1_794_270_000, "xx": ThingsChanges.emptyXX].merging(extra) { $1 }, entity: "ChecklistItem3")
+        }
+        let cloud = FakeThingsCloud(items: [
+            projectItem(project), tagItem(tag),
+            sampledTemplate(tpl, project: project, ["tt": "Stop sample B", "tg": [.string(tag)], "nt": ThingsChanges.noteObject("Sample **notes**")]),
+            item(two, "Two", 7), item(one, "One", -3),
+            taskItem(occurrence, ["tt": "Stop sample B", "tp": 0, "ss": 0, "tr": false, "rt": [.string(tpl)], "sr": 1_794_182_400,
+                                  "tir": 1_794_182_400, "pr": [.string(project)]], entity: "Task7"),
+        ])
+        let client = cloud.client()
+        let result = try await client.stopRepeating(templateId: tpl)
+        #expect(cloud.commits.count == 1, "everything in one commit")
+        let body = try cloud.commitBody()
+        let newOne = try #require(result.checklistIds[one]), newTwo = try #require(result.checklistIds[two])
+        #expect(Set(body.keys) == [result.todoId, newOne, newTwo, one, two, occurrence, tpl])
+
+        // The to-do: the first Stop sample's create with the title, tag, notes (and their checksum) and project of sample B.
+        let sampledTodo = try JSONValue.parse(Data(#"""
+        {"tp":0,"sr":1794268800,"dds":null,"rt":[],"rmd":null,"ss":0,"tr":false,"dl":[],"icp":false,"st":2,"ar":[],"tt":"Stop sample B","do":0,"lai":null,"tir":1794268800,"tg":["H96sVJwE7VJveAnv7itmux"],"agr":[],"ix":0,"cd":1794186000,"lt":true,"icc":0,"ti":0,"md":null,"dd":null,"ato":null,"nt":{"t":1,"ch":2335530048,"v":"Sample **notes**","_t":"tx"},"icsd":null,"pr":["JVH7o2GV7gnw7YsLPKuCZP"],"rp":null,"acrd":null,"sp":null,"sb":0,"rr":null,"xx":{"sn":{},"_t":"oo"}}
+        """#.utf8))
+        #expect(body[result.todoId] == ["t": 0, "e": "Task6", "p": sampledTodo])
+        // The checklist items as sampled, with this test's clock for `cd` (the same `cd` as the to-do) and its new to-do in `ts`.
+        func sampledItem(_ json: String) throws -> JSONValue {
+            var p = try #require(try JSONValue.parse(Data(json.utf8)).object)
+            p["cd"] = 1_794_186_000
+            p["ts"] = [.string(result.todoId)]
+            return ["t": 0, "e": "ChecklistItem3", "p": .object(p)]
+        }
+        #expect(body[newOne] == (try sampledItem(#"{"ix":0,"cd":1794276623.623518,"ts":["UigGY7zyRphxNeq29WvYSn"],"sp":null,"ss":0,"xx":{"sn":{},"_t":"oo"},"tt":"One","md":null,"lt":true}"#)))
+        #expect(body[newTwo] == (try sampledItem(#"{"lt":true,"cd":1794276623.623518,"ts":["UigGY7zyRphxNeq29WvYSn"],"sp":null,"ss":0,"xx":{"sn":{},"_t":"oo"},"md":null,"tt":"Two","ix":1}"#)))
+        // The template's own items, the open occurrence and the template, as sampled.
+        #expect(body[one] == ["t": 2, "e": "ChecklistItem3", "p": [:]] && body[two] == ["t": 2, "e": "ChecklistItem3", "p": [:]])
+        #expect(body[occurrence] == ["t": 1, "e": "Task6", "p": ["rt": []]])
+        #expect(body[tpl] == ["t": 2, "e": "Task6", "p": [:]])
+
+        let plain = try #require(try await client.refresh().snapshot.tasks[result.todoId])
+        #expect(plain.checklist.map(\.id) == [newOne, newTwo] && plain.checklist.map(\.title) == ["One", "Two"])
+        #expect(plain.notes == "Sample **notes**" && plain.tagIds == [tag])
+    }
+
+    @Test func stopCarriesAChecklistItemsStatusAndStopDate() async throws {
+        let project = ThingsID.generate(), tpl = ThingsID.generate(), done = ThingsID.generate()
+        let cloud = FakeThingsCloud(items: [
+            projectItem(project), sampledTemplate(tpl, project: project),
+            taskItem(done, ["tt": "Done", "ss": 3, "sp": 1_794_100_000, "ix": 0, "ts": [.string(tpl)]], entity: "ChecklistItem3"),
+        ])
+        let result = try await cloud.client().stopRepeating(templateId: tpl)
+        let copy = try #require(result.checklistIds[done])
+        let p = try #require(try cloud.commitBody()[copy]?["p"]?.object)
+        #expect(p["ss"] == 3 && p["sp"] == 1_794_100_000 && p["md"] == .null && p["lt"] == true && p["ix"] == 0)
     }
 
     @Test func stopIsRefusedForAnythingButALiveTemplateWithANextDay() async throws {

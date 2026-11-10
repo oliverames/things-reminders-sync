@@ -94,6 +94,12 @@ extension ThingsSnapshot {
 }
 
 extension SyncConfig {
+    /// Lists whose Reminders changes start a pass: enabled and not paused.
+    var watchedListIds: [String] { mappings.filter { $0.enabled && !$0.paused }.map(\.id) }
+    /// Lists whose sections are read: live project-mode lists that mirror sections as headings.
+    var sectionListIds: [String] { mappings.filter { $0.isLive && $0.mode == .project && $0.syncSections }.map(\.id) }
+    var pausedListIds: Set<String> { Set(mappings.filter(\.paused).map(\.id)) }
+
     /// Ids a mapping currently needs: its target, and a heading mapping's project.
     func targetIds(excluding mappingId: String? = nil) -> Set<String> {
         var ids = Set<String>()
